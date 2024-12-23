@@ -30,6 +30,7 @@ import (
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/kube/controller/ambient/statusqueue"
+	"istio.io/istio/pkg/activenotifier"
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/labels"
@@ -55,7 +56,7 @@ type Index interface {
 	ServicesForWaypoint(key model.WaypointKey) []model.ServiceInfo
 	SyncAll()
 	NetworksSynced()
-	RunStatus(stop <-chan struct{})
+	Run(stop <-chan struct{})
 	HasSynced() bool
 	model.AmbientIndexes
 }
@@ -120,6 +121,7 @@ type Options struct {
 	XDSUpdater            model.XDSUpdater
 	LookupNetwork         LookupNetwork
 	LookupNetworkGateways LookupNetworkGateways
+	StatusNotifier        *activenotifier.ActiveNotifier
 }
 
 func New(options Options) Index {
@@ -199,8 +201,8 @@ func New(options Options) Index {
 
 	authorizationPoliciesWriter := kclient.NewWriteClient[*securityclient.AuthorizationPolicy](options.Client)
 
-	statusQueue := statusqueue.NewQueue()
 	if features.EnableAmbientStatus {
+		statusQueue := statusqueue.NewQueue(options.StatusNotifier)
 		statusqueue.Register(statusQueue, "istio-ambient-service", WorkloadServices, func(info model.ServiceInfo) (kclient.Patcher, []string) {
 			// Since we have 1 collection for multiple types, we need to split these out
 			if info.Source.Kind == kind.ServiceEntry {
@@ -211,6 +213,7 @@ func New(options Options) Index {
 		statusqueue.Register(statusQueue, "istio-ambient-policy", AuthorizationPolicies, func(pol model.WorkloadAuthorization) (kclient.Patcher, []string) {
 			return kclient.ToPatcher(authorizationPoliciesWriter), getConditions(pol.Source.NamespacedName, authzPolicies)
 		})
+		a.statusQueue = statusQueue
 	}
 
 	ServiceAddressIndex := krt.NewIndex[networkAddress, model.ServiceInfo](WorkloadServices, networkAddressFromService)
@@ -302,7 +305,6 @@ func New(options Options) Index {
 		Collection: Waypoints,
 	}
 	a.authorizationPolicies = AllPolicies
-	a.statusQueue = statusQueue
 
 	return a
 }
@@ -506,8 +508,10 @@ func (a *index) NetworksSynced() {
 	a.networkUpdateTrigger.MarkSynced()
 }
 
-func (a *index) RunStatus(stop <-chan struct{}) {
-	go a.statusQueue.Run(stop)
+func (a *index) Run(stop <-chan struct{}) {
+	if a.statusQueue != nil {
+		go a.statusQueue.Run(stop)
+	}
 }
 
 func (a *index) HasSynced() bool {
