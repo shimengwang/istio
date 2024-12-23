@@ -22,9 +22,9 @@ import (
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	cares "github.com/envoyproxy/go-control-plane/envoy/extensions/network/dns_resolver/cares/v3"
 	http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	"google.golang.org/protobuf/proto"
 	anypb "google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -323,6 +323,19 @@ func (cb *ClusterBuilder) buildCluster(name string, discoveryType cluster.Cluste
 				c.DnsLookupFamily = cluster.Cluster_V4_ONLY
 			}
 		}
+		dnsResolverConfig, err := anypb.New(&cares.CaresDnsResolverConfig{
+			UdpMaxQueries: wrappers.UInt32(features.PilotDNSCaresUDPMaxQueries),
+		})
+		if err != nil {
+			log.Warnf("Could not create typed_dns_cluster_config for %s: %s. Using default configuration.", name, err)
+		} else {
+			c.TypedDnsResolverConfig = &core.TypedExtensionConfig{
+				Name:        "envoy.network.dns_resolver.cares",
+				TypedConfig: dnsResolverConfig,
+			}
+		}
+		// 0 disables jitter.
+		c.DnsJitter = durationpb.New(features.PilotDNSJitterDurationEnv)
 		c.DnsRefreshRate = cb.req.Push.Mesh.DnsRefreshRate
 		c.RespectDnsTtl = true
 		// we want to run all the STATIC parts as well to build the load assignment
@@ -339,13 +352,11 @@ func (cb *ClusterBuilder) buildCluster(name string, discoveryType cluster.Cluste
 			Endpoints:   localityLbEndpoints,
 		}
 	case cluster.Cluster_ORIGINAL_DST:
-		if features.PassthroughTargetPort {
-			if override, f := service.Attributes.PassthroughTargetPorts[uint32(port.Port)]; f {
-				c.LbConfig = &cluster.Cluster_OriginalDstLbConfig_{
-					OriginalDstLbConfig: &cluster.Cluster_OriginalDstLbConfig{
-						UpstreamPortOverride: wrappers.UInt32(override),
-					},
-				}
+		if override, f := service.Attributes.PassthroughTargetPorts[uint32(port.Port)]; f {
+			c.LbConfig = &cluster.Cluster_OriginalDstLbConfig_{
+				OriginalDstLbConfig: &cluster.Cluster_OriginalDstLbConfig{
+					UpstreamPortOverride: wrappers.UInt32(override),
+				},
 			}
 		}
 	}
@@ -514,7 +525,7 @@ func (cb *ClusterBuilder) buildBlackHoleCluster() *cluster.Cluster {
 	c := &cluster.Cluster{
 		Name:                 util.BlackHoleCluster,
 		ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_STATIC},
-		ConnectTimeout:       proto.Clone(cb.req.Push.Mesh.ConnectTimeout).(*durationpb.Duration),
+		ConnectTimeout:       cb.req.Push.Mesh.ConnectTimeout,
 		LbPolicy:             cluster.Cluster_ROUND_ROBIN,
 	}
 	c.AltStatName = util.DelimitedStatsPrefix(util.BlackHoleCluster)
@@ -527,7 +538,7 @@ func (cb *ClusterBuilder) buildDefaultPassthroughCluster() *cluster.Cluster {
 	cluster := &cluster.Cluster{
 		Name:                 util.PassthroughCluster,
 		ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_ORIGINAL_DST},
-		ConnectTimeout:       proto.Clone(cb.req.Push.Mesh.ConnectTimeout).(*durationpb.Duration),
+		ConnectTimeout:       cb.req.Push.Mesh.ConnectTimeout,
 		LbPolicy:             cluster.Cluster_CLUSTER_PROVIDED,
 		TypedExtensionProtocolOptions: map[string]*anypb.Any{
 			v3.HttpProtocolOptionsType: passthroughHttpProtocolOptions,
@@ -734,7 +745,7 @@ func (cb *ClusterBuilder) buildExternalSDSCluster(addr string) *cluster.Cluster 
 	c := &cluster.Cluster{
 		Name:                 security.SDSExternalClusterName,
 		ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_STATIC},
-		ConnectTimeout:       proto.Clone(cb.req.Push.Mesh.ConnectTimeout).(*durationpb.Duration),
+		ConnectTimeout:       cb.req.Push.Mesh.ConnectTimeout,
 		LoadAssignment: &endpoint.ClusterLoadAssignment{
 			ClusterName: security.SDSExternalClusterName,
 			Endpoints: []*endpoint.LocalityLbEndpoints{

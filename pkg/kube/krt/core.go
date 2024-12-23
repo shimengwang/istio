@@ -26,7 +26,7 @@ var log = istiolog.RegisterScope("krt", "")
 // directly. Most importantly, consumers can subscribe to events when objects change.
 type Collection[T any] interface {
 	// GetKey returns an object by its key, if present. Otherwise, nil is returned.
-	GetKey(k Key[T]) *T
+	GetKey(k string) *T
 
 	// List returns all objects in the collection.
 	// Order of the list is undefined.
@@ -48,6 +48,11 @@ type EventStream[T any] interface {
 	// called. Typically, usage of Register is done internally in krt via composition of Collections with Transformations
 	// (NewCollection, NewManyCollection, NewSingleton); however, at boundaries of the system (connecting to something not
 	// using krt), registering directly is expected.
+	// Handlers have the following semantics:
+	// * On each event, all handlers are called.
+	// * Each handler has its own unbounded event queue. Slow handlers will cause this queue to accumulate, but will not block
+	//   other handlers.
+	// * Events will be sent in order, and will not be dropped or deduplicated.
 	Register(f func(o Event[T])) Syncer
 
 	// Synced returns a Syncer which can be used to determine if the collection has synced. Once its synced, all dependencies have
@@ -58,6 +63,7 @@ type EventStream[T any] interface {
 	// Otherwise, behaves the same as Register.
 	// Additionally, skipping the default behavior of "send all current state through the handler" can be turned off.
 	// This is important when we register in a handler itself, which would cause duplicative events.
+	// Handlers MUST not mutate the event list.
 	RegisterBatch(f func(o []Event[T], initialSync bool), runExistingState bool) Syncer
 }
 
@@ -72,7 +78,7 @@ type internalCollection[T any] interface {
 	// Uid is an internal unique ID for this collection. MUST be globally unique
 	uid() collectionUID
 
-	dump()
+	dump() CollectionDump
 
 	// Augment mutates an object for use in various function calls. See WithObjectAugmentation
 	augment(any) any

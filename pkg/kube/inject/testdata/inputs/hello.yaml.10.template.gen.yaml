@@ -35,7 +35,7 @@ templates:
         {{- end }}
       {{- end }}
     {{- end }}
-    {{ $nativeSidecar := (eq (env "ENABLE_NATIVE_SIDECARS" "false") "true") }}
+    {{ $nativeSidecar := (or (and (not (isset .ObjectMeta.Annotations `sidecar.istio.io/nativeSidecar`)) (eq (env "ENABLE_NATIVE_SIDECARS" "false") "true")) (eq (index .ObjectMeta.Annotations `sidecar.istio.io/nativeSidecar`) "true")) }}
     {{- $containers := list }}
     {{- range $index, $container := .Spec.Containers }}{{ if not (eq $container.Name "istio-proxy") }}{{ $containers = append $containers $container.Name }}{{end}}{{- end}}
     metadata:
@@ -72,6 +72,7 @@ templates:
         traffic.sidecar.istio.io/excludeOutboundPorts: "{{ annotation .ObjectMeta `traffic.sidecar.istio.io/excludeOutboundPorts` .Values.global.proxy.excludeOutboundPorts }}",
         {{- end }}
         {{ with index .ObjectMeta.Annotations `traffic.sidecar.istio.io/kubevirtInterfaces` }}traffic.sidecar.istio.io/kubevirtInterfaces: "{{.}}",{{ end }}
+        {{ with index .ObjectMeta.Annotations `istio.io/reroute-virtual-interfaces` }}istio.io/reroute-virtual-interfaces: "{{.}}",{{ end }}
         {{ with index .ObjectMeta.Annotations `traffic.sidecar.istio.io/excludeInterfaces` }}traffic.sidecar.istio.io/excludeInterfaces: "{{.}}",{{ end }}
     {{- end }}
       }
@@ -125,6 +126,10 @@ templates:
         - "-k"
         - "{{ index .ObjectMeta.Annotations `traffic.sidecar.istio.io/kubevirtInterfaces` }}"
         {{ end -}}
+        {{ if (isset .ObjectMeta.Annotations `istio.io/reroute-virtual-interfaces`) -}}
+        - "-k"
+        - "{{ index .ObjectMeta.Annotations `istio.io/reroute-virtual-interfaces` }}"
+        {{ end -}}
          {{ if (isset .ObjectMeta.Annotations `traffic.sidecar.istio.io/excludeInterfaces`) -}}
         - "-c"
         - "{{ index .ObjectMeta.Annotations `traffic.sidecar.istio.io/excludeInterfaces` }}"
@@ -172,34 +177,6 @@ templates:
           runAsNonRoot: true
         {{- end }}
       {{ end -}}
-      {{- if eq (annotation .ObjectMeta `sidecar.istio.io/enableCoreDump` .Values.global.proxy.enableCoreDump) "true" }}
-      - name: enable-core-dump
-        args:
-        - -c
-        - sysctl -w kernel.core_pattern=/var/lib/istio/data/core.proxy && ulimit -c unlimited
-        command:
-          - /bin/sh
-      {{- if contains "/" (annotation .ObjectMeta `sidecar.istio.io/proxyImage` .Values.global.proxy_init.image) }}
-        image: "{{ annotation .ObjectMeta `sidecar.istio.io/proxyImage` .Values.global.proxy_init.image }}"
-      {{- else }}
-        image: "{{ .ProxyImage }}"
-      {{- end }}
-        {{with .Values.global.imagePullPolicy }}imagePullPolicy: "{{.}}"{{end}}
-        resources:
-      {{ template "resources" . }}
-        securityContext:
-          allowPrivilegeEscalation: true
-          capabilities:
-            add:
-            - SYS_ADMIN
-            drop:
-            - ALL
-          privileged: true
-          readOnlyRootFilesystem: false
-          runAsGroup: 0
-          runAsNonRoot: false
-          runAsUser: 0
-      {{ end }}
       {{ if not $nativeSidecar }}
       containers:
       {{ end }}
@@ -332,9 +309,9 @@ templates:
         - name: ISTIO_META_NETWORK
           value: "{{ .Values.global.network }}"
         {{- end }}
-        {{- if .DeploymentMeta.Name }}
+        {{- with (index .ObjectMeta.Labels `service.istio.io/workload-name` | default .DeploymentMeta.Name) }}
         - name: ISTIO_META_WORKLOAD_NAME
-          value: "{{ .DeploymentMeta.Name }}"
+          value: "{{ . }}"
         {{ end }}
         {{- if and .TypeMeta.APIVersion .DeploymentMeta.Name }}
         - name: ISTIO_META_OWNER
@@ -395,7 +372,7 @@ templates:
             drop:
             - ALL
           privileged: true
-          readOnlyRootFilesystem: {{ ne (annotation .ObjectMeta `sidecar.istio.io/enableCoreDump` .Values.global.proxy.enableCoreDump) "true" }}
+          readOnlyRootFilesystem: true
           runAsGroup: {{ .ProxyGID | default "1337" }}
           runAsNonRoot: false
           runAsUser: 0
@@ -414,7 +391,7 @@ templates:
             drop:
             - ALL
           privileged: {{ .Values.global.proxy.privileged }}
-          readOnlyRootFilesystem: {{ ne (annotation .ObjectMeta `sidecar.istio.io/enableCoreDump` .Values.global.proxy.enableCoreDump) "true" }}
+          readOnlyRootFilesystem: true
           runAsGroup: {{ .ProxyGID | default "1337" }}
           {{ if or (eq (annotation .ObjectMeta `sidecar.istio.io/interceptionMode` .ProxyConfig.InterceptionMode) `TPROXY`) (eq (annotation .ObjectMeta `sidecar.istio.io/capNetBindService` .Values.global.proxy.capNetBindService) `true`) -}}
           runAsNonRoot: false
@@ -1267,6 +1244,9 @@ templates:
           containers:
           - name: istio-proxy
             ports:
+            - containerPort: 15020
+              name: metrics
+              protocol: TCP
             - containerPort: 15021
               name: status-port
               protocol: TCP
@@ -1295,6 +1275,9 @@ templates:
             {{- if .Values.global.logAsJson }}
             - --log_as_json
             {{- end }}
+            {{- if .Values.global.proxy.outlierLogPath }}
+            - --outlierLogPath={{ .Values.global.proxy.outlierLogPath }}
+            {{- end}}
             env:
             - name: ISTIO_META_SERVICE_ACCOUNT
               valueFrom:
@@ -1373,6 +1356,10 @@ templates:
             - name: ISTIO_META_MESH_ID
               value: "{{ (valueOrDefault .MeshConfig.TrustDomain .Values.global.trustDomain) }}"
             {{- end }}
+            {{- with (valueOrDefault .MeshConfig.TrustDomain .Values.global.trustDomain) }}
+            - name: TRUST_DOMAIN
+              value: "{{ . }}"
+            {{- end }}
             {{- if .Values.global.waypoint.resources }}
             resources:
             {{- toYaml .Values.global.waypoint.resources | nindent 10 }}
@@ -1399,8 +1386,10 @@ templates:
               timeoutSeconds: 1
             securityContext:
               privileged: false
+            {{- if not (eq .Values.global.platform "openshift") }}
               runAsGroup: 1337
               runAsUser: 1337
+            {{- end }}
               allowPrivilegeEscalation: false
               readOnlyRootFilesystem: true
               runAsNonRoot: true
@@ -1412,8 +1401,8 @@ templates:
     {{- toYaml .Values.gateways.seccompProfile | nindent 12 }}
     {{- end }}
             volumeMounts:
-            - name: workload-socket
-              mountPath: /var/run/secrets/workload-spiffe-uds
+            - mountPath: /var/run/secrets/workload-spiffe-uds
+              name: workload-socket
             - mountPath: /var/run/secrets/istio
               name: istiod-ca-cert
             - mountPath: /var/lib/istio/data
@@ -1467,7 +1456,14 @@ templates:
     kind: Service
     metadata:
       annotations:
-        {{ toJsonMap (omit .InfrastructureAnnotations "kubectl.kubernetes.io/last-applied-configuration" "gateway.istio.io/name-override" "gateway.istio.io/service-account" "gateway.istio.io/controller-version") | nindent 4 }}
+        {{ toJsonMap
+          (strdict "networking.istio.io/traffic-distribution" "PreferClose")
+          (omit .InfrastructureAnnotations
+            "kubectl.kubernetes.io/last-applied-configuration"
+            "gateway.istio.io/name-override"
+            "gateway.istio.io/service-account"
+            "gateway.istio.io/controller-version"
+          ) | nindent 4 }}
       labels:
         {{- toJsonMap
           .InfrastructureLabels
@@ -1603,6 +1599,9 @@ templates:
               runAsGroup: {{ .ProxyGID | default "1337" }}
               runAsNonRoot: true
             ports:
+            - containerPort: 15020
+              name: metrics
+              protocol: TCP
             - containerPort: 15021
               name: status-port
               protocol: TCP

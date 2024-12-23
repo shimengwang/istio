@@ -1,14 +1,11 @@
 # This file is only used for remote `istiod` installs.
-{{- if regexMatch "^([0-9]*\\.){3}[0-9]*$" .Values.global.remotePilotAddress }}
+{{- if .Values.istiodRemote.enabled }}
 # if the remotePilotAddress is an IP addr
+{{- if regexMatch "^([0-9]*\\.){3}[0-9]*$" .Values.global.remotePilotAddress }}
 apiVersion: v1
 kind: Endpoints
 metadata:
-  {{- if .Values.global.externalIstiod }}
   name: istiod{{- if .Values.revision }}-{{ .Values.revision}}{{- end }}
-  {{- else }}
-  name: istiod{{- if .Values.revision }}-{{ .Values.revision}}{{- end }}-remote
-  {{- end }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: "istiod"
@@ -24,4 +21,5 @@ subsets:
     name: tcp-webhook
     protocol: TCP
 ---
+{{- end }}
 {{- end }}

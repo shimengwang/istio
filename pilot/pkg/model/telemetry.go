@@ -204,6 +204,7 @@ type TracingSpec struct {
 	RandomSamplingPercentage     *float64
 	CustomTags                   map[string]*tpb.Tracing_CustomTag
 	UseRequestIDForTraceSampling bool
+	EnableIstioTags              bool
 }
 
 type LoggingConfig struct {
@@ -238,7 +239,7 @@ func workloadMode(class networking.ListenerClass) tpb.WorkloadMode {
 // If nil or empty configuration is returned, access logs are not configured via Telemetry and should use fallback mechanisms.
 // If access logging is explicitly disabled, a configuration with disabled set to true is returned.
 func (t *Telemetries) AccessLogging(push *PushContext, proxy *Proxy, class networking.ListenerClass, svc *Service) []LoggingConfig {
-	ct := t.applicableTelemetries(proxy, nil)
+	ct := t.applicableTelemetries(proxy, svc)
 	if len(ct.Logging) == 0 && len(t.meshConfig.GetDefaultProviders().GetAccessLogging()) == 0 {
 		// No Telemetry API configured, fall back to legacy mesh config setting
 		return nil
@@ -269,7 +270,7 @@ func (t *Telemetries) AccessLogging(push *PushContext, proxy *Proxy, class netwo
 			Disabled: v.Disabled,
 		}
 
-		al := telemetryAccessLog(push, fp)
+		al := telemetryAccessLog(push, proxy, fp)
 		if al == nil {
 			// stackdriver will be handled in HTTPFilters/TCPFilters
 			continue
@@ -296,8 +297,8 @@ func (t *Telemetries) Tracing(proxy *Proxy, svc *Service) *TracingConfig {
 		return nil
 	}
 
-	clientSpec := TracingSpec{UseRequestIDForTraceSampling: true}
-	serverSpec := TracingSpec{UseRequestIDForTraceSampling: true}
+	clientSpec := TracingSpec{UseRequestIDForTraceSampling: true, EnableIstioTags: true}
+	serverSpec := TracingSpec{UseRequestIDForTraceSampling: true, EnableIstioTags: true}
 
 	if hasDefaultProvider {
 		// todo: what do we want to do with more than one default provider?
@@ -351,6 +352,11 @@ func (t *Telemetries) Tracing(proxy *Proxy, svc *Service) *TracingConfig {
 		if m.UseRequestIdForTraceSampling != nil {
 			for _, spec := range specs {
 				spec.UseRequestIDForTraceSampling = m.UseRequestIdForTraceSampling.Value
+			}
+		}
+		if m.EnableIstioTags != nil {
+			for _, spec := range specs {
+				spec.EnableIstioTags = m.EnableIstioTags.Value
 			}
 		}
 	}

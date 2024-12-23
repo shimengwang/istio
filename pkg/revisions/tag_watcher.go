@@ -62,7 +62,7 @@ func NewTagWatcher(client kube.Client, revision string) TagWatcher {
 	p.index = kclient.CreateStringIndex(p.webhooks,
 		func(o *admissionregistrationv1.MutatingWebhookConfiguration) []string {
 			rev := o.GetLabels()[label.IoIstioRev.Name]
-			if rev == "" {
+			if rev == "" || !isTagWebhook(o) {
 				return nil
 			}
 			return []string{rev}
@@ -91,7 +91,7 @@ func (p *tagWatcher) HasSynced() bool {
 func (p *tagWatcher) GetMyTags() sets.String {
 	res := sets.New(p.revision)
 	for _, wh := range p.index.Lookup(p.revision) {
-		res.Insert(wh.GetLabels()[IstioTagLabel])
+		res.Insert(wh.GetLabels()[label.IoIstioTag.Name])
 	}
 	return res
 }
@@ -109,8 +109,6 @@ func isTagWebhook(uobj any) bool {
 	if obj == nil {
 		return false
 	}
-	_, ok := obj.GetLabels()[IstioTagLabel]
+	_, ok := obj.GetLabels()[label.IoIstioTag.Name]
 	return ok
 }
-
-const IstioTagLabel = "istio.io/tag"

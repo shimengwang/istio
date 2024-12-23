@@ -166,6 +166,10 @@ _internal_defaults_do_not_set:
     # defaultTemplates: ["sidecar", "hello"]
     defaultTemplates: []
   istiodRemote:
+    # If `true`, indicates that this cluster/install should consume a "remote istiod" installation,
+    # and istiod itself will NOT be installed in this cluster - only the support resources necessary
+    # to utilize a remote instance.
+    enabled: false
     # Sidecar injector mutating webhook configuration clientConfig.url value.
     # For example: https://$remotePilotAddress:15017/inject
     # The host should not refer to a service running in the cluster; use a service reference by specifying
@@ -310,9 +314,6 @@ _internal_defaults_do_not_set:
       # not set, then the global "logLevel" will be used.
       componentLogLevel: "misc:error"
 
-      # If set, newly injected sidecars will have core dumps enabled.
-      enableCoreDump: false
-
       # istio ingress capture allowlist
       # examples:
       #     Redirect only selected ports:            --includeInboundPorts="80,8080"
@@ -398,9 +399,7 @@ _internal_defaults_do_not_set:
     # If not set explicitly, default to the Istio discovery address.
     caAddress: ""
 
-    # Configure a remote cluster data plane controlled by an external istiod.
-    # When set to true, istiod is not deployed locally and only a subset of the other
-    # discovery charts are enabled.
+    # Enable control of remote clusters.
     externalIstiod: false
 
     # Configure a remote cluster as the config cluster for an external istiod.

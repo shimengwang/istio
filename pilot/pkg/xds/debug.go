@@ -46,6 +46,7 @@ import (
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/resource"
 	"istio.io/istio/pkg/config/xds"
+	"istio.io/istio/pkg/kube/krt"
 	istiolog "istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/security"
 	"istio.io/istio/pkg/slices"
@@ -205,6 +206,7 @@ func (s *DiscoveryServer) AddDebugHandlers(mux, internalMux *http.ServeMux, enab
 	s.addDebugHandler(mux, internalMux, "/debug/resourcesz", "Debug support for watched resources", s.resourcez)
 	s.addDebugHandler(mux, internalMux, "/debug/instancesz", "Debug support for service instances", s.instancesz)
 	s.addDebugHandler(mux, internalMux, "/debug/ambientz", "Debug support for ambient", s.ambientz)
+	s.addDebugHandler(mux, internalMux, "/debug/krtz", "Debug support for krt (internal state)", s.krtz)
 
 	s.addDebugHandler(mux, internalMux, "/debug/authorizationz", "Internal authorization policies", s.authorizationz)
 	s.addDebugHandler(mux, internalMux, "/debug/telemetryz", "Debug Telemetry configuration", s.telemetryz)
@@ -583,7 +585,7 @@ func (s *DiscoveryServer) ConfigDump(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	includeEds := req.URL.Query().Get("include_eds") == "true"
+	includeEds := req.URL.Query().Has("include_eds")
 	dump, err := s.connectionConfigDump(con, includeEds)
 	if err != nil {
 		handleHTTPError(w, err)
@@ -598,7 +600,13 @@ func (s *DiscoveryServer) getResourceTypes(req *http.Request) []string {
 
 		resourceTypes := sets.New[string]()
 		for _, t := range ts {
-			resourceTypes.Insert(v3.GetResourceType(t))
+			rType := v3.GetResourceType(t)
+			resourceTypes.Insert(rType)
+			// special case for AddressType, include WorkloadType as well
+			// because they shared same short type name `WDS`
+			if rType == v3.AddressType {
+				resourceTypes.Insert(v3.WorkloadType)
+			}
 		}
 
 		return resourceTypes.UnsortedList()
@@ -1043,7 +1051,7 @@ func (s *DiscoveryServer) ambientz(w http.ResponseWriter, req *http.Request) {
 		return []byte(ip.String())
 	}
 	rewriteNetworkAddress := func(b *workloadapi.NetworkAddress) *workloadapi.NetworkAddress {
-		nb := proto.Clone(b).(*workloadapi.NetworkAddress)
+		nb := protomarshal.Clone(b)
 		nb.Address = rewriteAddress(nb.Address)
 		return nb
 	}
@@ -1051,7 +1059,7 @@ func (s *DiscoveryServer) ambientz(w http.ResponseWriter, req *http.Request) {
 		if b == nil {
 			return nil
 		}
-		nb := proto.Clone(b).(*workloadapi.GatewayAddress)
+		nb := protomarshal.Clone(b)
 		switch t := nb.Destination.(type) {
 		case *workloadapi.GatewayAddress_Address:
 			t.Address = rewriteNetworkAddress(t.Address)
@@ -1059,7 +1067,7 @@ func (s *DiscoveryServer) ambientz(w http.ResponseWriter, req *http.Request) {
 		return nb
 	}
 	for _, original := range addresses {
-		addr := proto.Clone(original.Address).(*workloadapi.Address)
+		addr := protomarshal.Clone(original.Address)
 		switch addr := addr.Type.(type) {
 		case *workloadapi.Address_Workload:
 			w := addr.Workload
@@ -1078,6 +1086,10 @@ func (s *DiscoveryServer) ambientz(w http.ResponseWriter, req *http.Request) {
 		res.Policies = append(res.Policies, jsonMarshalProto{policy.Authorization})
 	}
 	writeJSON(w, res, req)
+}
+
+func (s *DiscoveryServer) krtz(w http.ResponseWriter, req *http.Request) {
+	writeJSON(w, krt.GlobalDebugHandler, req)
 }
 
 func (s *DiscoveryServer) networkz(w http.ResponseWriter, req *http.Request) {

@@ -133,7 +133,8 @@ var (
 		"If this is set to true, support for Kubernetes gateway-api (github.com/kubernetes-sigs/gateway-api) will "+
 			" be enabled. In addition to this being enabled, the gateway-api CRDs need to be installed.").Get()
 
-	EnableAlphaGatewayAPI = env.Register("PILOT_ENABLE_ALPHA_GATEWAY_API", false,
+	EnableAlphaGatewayAPIName = "PILOT_ENABLE_ALPHA_GATEWAY_API"
+	EnableAlphaGatewayAPI     = env.Register(EnableAlphaGatewayAPIName, false,
 		"If this is set to true, support for alpha APIs in the Kubernetes gateway-api (github.com/kubernetes-sigs/gateway-api) will "+
 			" be enabled. In addition to this being enabled, the gateway-api CRDs need to be installed.").Get()
 
@@ -147,8 +148,8 @@ var (
 		"If this is set to true, istiod will create and manage its default GatewayClasses").Get()
 
 	DeltaXds = env.Register("ISTIO_DELTA_XDS", true,
-		"If enabled, pilot will only send the delta configs as opposed to the state of the world on a "+
-			"Resource Request. This feature uses the delta xds api, but does not currently send the actual deltas.").Get()
+		"If enabled, pilot will only send the delta configs as opposed to the state of the world configuration on a Resource Request. "+
+			"While this feature uses the delta xds api, it may still occasionally send unchanged configurations instead of just the actual deltas.").Get()
 
 	EnableQUICListeners = env.Register("PILOT_ENABLE_QUIC_LISTENERS", false,
 		"If true, QUIC listeners will be generated wherever there are listeners terminating TLS on gateways "+
@@ -159,10 +160,6 @@ var (
 
 	EnableHCMInternalNetworks = env.Register("ENABLE_HCM_INTERNAL_NETWORKS", false,
 		"If enable, endpoints defined in mesh networks will be configured as internal addresses in Http Connection Manager").Get()
-
-	EnableEnhancedResourceScoping = env.Register("ENABLE_ENHANCED_RESOURCE_SCOPING", true,
-		"If enabled, meshConfig.discoverySelectors will limit the CustomResource configurations(like Gateway,VirtualService,DestinationRule,Ingress, etc)"+
-			"that can be processed by pilot. This will also restrict the root-ca certificate distribution.").Get()
 
 	EnableLeaderElection = env.Register("ENABLE_LEADER_ELECTION", true,
 		"If enabled (default), starts a leader election client and gains leadership before executing controllers. "+
@@ -180,9 +177,6 @@ var (
 	// This is used in injection templates, it is not unused.
 	EnableNativeSidecars = env.Register("ENABLE_NATIVE_SIDECARS", false,
 		"If set, used Kubernetes native Sidecar container support. Requires SidecarContainer feature flag.")
-
-	PassthroughTargetPort = env.Register("ENABLE_RESOLUTION_NONE_TARGET_PORT", true,
-		"If enabled, targetPort will be supported for resolution=NONE ServiceEntry").Get()
 
 	Enable100ContinueHeaders = env.Register("ENABLE_100_CONTINUE_HEADERS", true,
 		"If enabled, istiod will proxy 100-continue headers as is").Get()

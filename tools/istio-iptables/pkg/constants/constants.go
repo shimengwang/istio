@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"istio.io/istio/pkg/env"
+	"istio.io/istio/pkg/util/sets"
 )
 
 // iptables tables
@@ -37,13 +38,16 @@ const (
 	POSTROUTING = "POSTROUTING"
 )
 
-var BuiltInChainsMap = map[string]struct{}{
-	INPUT:       {},
-	OUTPUT:      {},
-	FORWARD:     {},
-	PREROUTING:  {},
-	POSTROUTING: {},
-}
+var BuiltInChainsMap = sets.New(
+	INPUT,
+	OUTPUT,
+	FORWARD,
+	PREROUTING,
+	POSTROUTING,
+	ACCEPT,
+	RETURN,
+	DROP,
+)
 
 // Constants used for generating iptables commands
 const (
@@ -93,7 +97,7 @@ const (
 	InboundTunnelPort         = "inbound-tunnel-port"
 	ProxyUID                  = "proxy-uid"
 	ProxyGID                  = "proxy-gid"
-	KubeVirtInterfaces        = "kube-virt-interfaces"
+	RerouteVirtualInterfaces  = "kube-virt-interfaces"
 	DryRun                    = "dry-run"
 	TraceLogging              = "iptables-trace-logging"
 	SkipRuleApply             = "skip-rule-apply"

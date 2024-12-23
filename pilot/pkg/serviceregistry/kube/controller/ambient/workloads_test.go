@@ -16,6 +16,7 @@ package ambient
 
 import (
 	"net/netip"
+	"sync/atomic"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -23,9 +24,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"istio.io/api/label"
 	networking "istio.io/api/networking/v1alpha3"
 	networkingclient "istio.io/client-go/pkg/apis/networking/v1"
 	securityclient "istio.io/client-go/pkg/apis/security/v1"
+	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/labels"
@@ -384,8 +387,8 @@ func TestPodWorkloads(t *testing.T) {
 					Name:      "name",
 					Namespace: "ns",
 					Labels: map[string]string{
-						"app":                             "foo",
-						constants.AmbientUseWaypointLabel: "waypoint",
+						"app":                         "foo",
+						label.IoIstioUseWaypoint.Name: "waypoint",
 					},
 				},
 				Spec: v1.PodSpec{},
@@ -428,7 +431,7 @@ func TestPodWorkloads(t *testing.T) {
 					Name:      "waypoint",
 					Namespace: "ns",
 					Labels: map[string]string{
-						constants.GatewayNameLabel: "waypoint",
+						label.IoK8sNetworkingGatewayGatewayName.Name: "waypoint",
 					},
 				},
 				Spec: v1.PodSpec{},
@@ -1116,6 +1119,90 @@ func TestWorkloadEntryWorkloads(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:   "cross network we hostname gateway",
+			inputs: []any{},
+			we: &networkingclient.WorkloadEntry{
+				TypeMeta: metav1.TypeMeta{},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "name",
+					Namespace: "ns",
+				},
+				Spec: networking.WorkloadEntry{
+					Ports: map[string]uint32{
+						"80": 80,
+					},
+					Network: "remote-network-hostname",
+				},
+			},
+			result: &workloadapi.Workload{
+				Uid:               "cluster0/networking.istio.io/WorkloadEntry/ns/name",
+				Name:              "name",
+				Namespace:         "ns",
+				Network:           "remote-network-hostname",
+				CanonicalName:     "name",
+				CanonicalRevision: "latest",
+				WorkloadType:      workloadapi.WorkloadType_POD,
+				WorkloadName:      "name",
+				Status:            workloadapi.WorkloadStatus_HEALTHY,
+				ClusterId:         testC,
+				NetworkGateway: &workloadapi.GatewayAddress{
+					Destination: &workloadapi.GatewayAddress_Hostname{Hostname: &workloadapi.NamespacedHostname{
+						Hostname:  "networkgateway.example.com",
+						Namespace: "ns-gtw",
+					}},
+					HboneMtlsPort: 15008,
+				},
+			},
+		},
+		{
+			name: "waypoint binding",
+			inputs: []any{
+				Waypoint{
+					Named: krt.Named{Name: "waypoint", Namespace: "ns"},
+					Address: &workloadapi.GatewayAddress{
+						Destination: &workloadapi.GatewayAddress_Hostname{
+							Hostname: &workloadapi.NamespacedHostname{
+								Namespace: "ns",
+								Hostname:  "waypoint.example.com",
+							},
+						},
+					},
+					DefaultBinding: &InboundBinding{Port: 15088, Protocol: workloadapi.ApplicationTunnel_PROXY},
+					TrafficType:    constants.AllTraffic,
+				},
+			},
+			we: &networkingclient.WorkloadEntry{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "name",
+					Namespace: "ns",
+					Labels: map[string]string{
+						label.IoK8sNetworkingGatewayGatewayName.Name: "waypoint",
+					},
+				},
+				Spec: networking.WorkloadEntry{
+					Ports: map[string]uint32{
+						"80": 80,
+					},
+				},
+			},
+			result: &workloadapi.Workload{
+				Uid:               "cluster0/networking.istio.io/WorkloadEntry/ns/name",
+				Name:              "name",
+				Namespace:         "ns",
+				CanonicalName:     "name",
+				CanonicalRevision: "latest",
+				Network:           "testnetwork",
+				WorkloadType:      workloadapi.WorkloadType_POD,
+				WorkloadName:      "name",
+				Status:            workloadapi.WorkloadStatus_HEALTHY,
+				ClusterId:         testC,
+				ApplicationTunnel: &workloadapi.ApplicationTunnel{
+					Protocol: workloadapi.ApplicationTunnel_PROXY,
+					Port:     15088,
+				},
+			},
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1244,7 +1331,7 @@ func TestServiceEntryWorkloads(t *testing.T) {
 					Endpoints: []*networking.WorkloadEntry{
 						// One is bound to waypoint, other is not
 						{Address: "2.3.4.5"},
-						{Address: "3.4.5.6", Labels: map[string]string{constants.AmbientUseWaypointLabel: "waypoint"}},
+						{Address: "3.4.5.6", Labels: map[string]string{label.IoIstioUseWaypoint.Name: "waypoint"}},
 					},
 				},
 			},
@@ -1494,14 +1581,19 @@ func kubernetesAPIServerEndpoint(ip string) *discovery.EndpointSlice {
 }
 
 func newAmbientUnitTest() *index {
-	return &index{
+	idx := &index{
 		networkUpdateTrigger: krt.NewRecomputeTrigger(true),
+		networkGateways:      new(atomic.Pointer[map[network.ID][]model.NetworkGateway]),
 		ClusterID:            testC,
 		DomainSuffix:         "domain.suffix",
 		Network: func(endpointIP string, labels labels.Instance) network.ID {
 			return testNW
 		},
-		LookupNetworkGateways: func() []model.NetworkGateway {
+		Flags: FeatureFlags{
+			DefaultAllowFromWaypoint:              features.DefaultAllowFromWaypoint,
+			EnableK8SServiceSelectWorkloadEntries: features.EnableK8SServiceSelectWorkloadEntries,
+		},
+		LookupNetworkGatewaysExpensive: func() []model.NetworkGateway {
 			return []model.NetworkGateway{
 				{
 					Network:   "remote-network",
@@ -1514,9 +1606,22 @@ func newAmbientUnitTest() *index {
 						Name:      "sa-gtw",
 					},
 				},
+				{
+					Network:   "remote-network-hostname",
+					Addr:      "networkgateway.example.com",
+					Cluster:   "cluster-a",
+					Port:      15008,
+					HBONEPort: 15008,
+					ServiceAccount: types.NamespacedName{
+						Namespace: "ns-gtw",
+						Name:      "sa-gtw",
+					},
+				},
 			}
 		},
 	}
+	idx.SyncAll()
+	return idx
 }
 
 var podReady = []v1.PodCondition{

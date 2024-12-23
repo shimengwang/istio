@@ -32,6 +32,7 @@ import (
 	k8salpha "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	k8sbeta "sigs.k8s.io/gateway-api/apis/v1beta1"
 
+	"istio.io/api/annotation"
 	istio "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
@@ -1615,7 +1616,7 @@ func createMirrorFilter(ctx configContext, filter *k8s.HTTPRequestMirrorFilter, 
 	}
 	var percent *istio.Percent
 	if f := filter.Fraction; f != nil {
-		percent = &istio.Percent{Value: float64(f.Numerator) / float64(ptr.OrDefault(f.Denominator, int32(100)))}
+		percent = &istio.Percent{Value: (100 * float64(f.Numerator)) / float64(ptr.OrDefault(f.Denominator, int32(100)))}
 	} else if p := filter.Percent; p != nil {
 		percent = &istio.Percent{Value: float64(*p)}
 	}
@@ -2047,7 +2048,6 @@ func convertGateways(r configContext) ([]config.Config, map[parentKey][]*parentI
 	namespaceLabelReferences := sets.New[string]()
 	classes := getGatewayClasses(r.GatewayResources)
 	for _, obj := range r.Gateway {
-		obj := obj
 		kgw := obj.Spec.(*k8s.GatewaySpec)
 		controllerName, f := classes[string(kgw.GatewayClassName)]
 		if !f {
@@ -2059,6 +2059,7 @@ func convertGateways(r configContext) ([]config.Config, map[parentKey][]*parentI
 			continue
 		}
 		if classInfo.disableRouteGeneration {
+			reportUnmanagedGatewayStatus(obj)
 			// We found it, but don't want to handle this class
 			continue
 		}
@@ -2073,7 +2074,6 @@ func convertGateways(r configContext) ([]config.Config, map[parentKey][]*parentI
 			continue
 		}
 		for i, l := range kgw.Listeners {
-			i := i
 			namespaceLabelReferences.InsertAll(getNamespaceLabelReferences(l.AllowedRoutes)...)
 			server, programmed := buildListener(r, obj, l, i, controllerName)
 
@@ -2302,6 +2302,34 @@ func reportGatewayStatus(
 	})
 }
 
+// reportUnmanagedGatewayStatus reports a status message for an unmanaged gateway.
+// For these gateways, we don't deploy them. However, all gateways ought to have a status message, even if its basically
+// just to say something read it
+func reportUnmanagedGatewayStatus(obj config.Config) {
+	gatewayConditions := map[string]*condition{
+		string(k8s.GatewayConditionAccepted): {
+			reason:  string(k8s.GatewayReasonAccepted),
+			message: "Resource accepted",
+		},
+		string(k8s.GatewayConditionProgrammed): {
+			reason: string(k8s.GatewayReasonProgrammed),
+			// Set to true anyway since this is basically declaring it as valid
+			message: "This Gateway is remote; Istio will not program it",
+		},
+	}
+
+	obj.Status.(*kstatus.WrappedStatus).Mutate(func(s config.Status) config.Status {
+		gs := s.(*k8s.GatewayStatus)
+		spec := obj.Spec.(*k8s.GatewaySpec)
+		gs.Addresses = slices.Map(spec.Addresses, func(e k8s.GatewayAddress) k8s.GatewayStatusAddress {
+			return k8s.GatewayStatusAddress(e)
+		})
+		gs.Listeners = nil
+		gs.Conditions = setConditions(obj.Generation, gs.Conditions, gatewayConditions)
+		return gs
+	})
+}
+
 // IsManaged checks if a Gateway is managed (ie we create the Deployment and Service) or unmanaged.
 // This is based on the address field of the spec. If address is set with a Hostname type, it should point to an existing
 // Service that handles the gateway traffic. If it is not set, or refers to only a single IP, we will consider it managed and provision the Service.
@@ -2336,7 +2364,7 @@ func IsManaged(gw *k8s.GatewaySpec) bool {
 
 func extractGatewayServices(r GatewayResources, kgw *k8s.GatewaySpec, obj config.Config, info classInfo) ([]string, *ConfigError) {
 	if IsManaged(kgw) {
-		name := model.GetOrDefault(obj.Annotations[gatewayNameOverride], getDefaultName(obj.Name, kgw, info.disableNameSuffix))
+		name := model.GetOrDefault(obj.Annotations[annotation.GatewayNameOverride.Name], getDefaultName(obj.Name, kgw, info.disableNameSuffix))
 		return []string{fmt.Sprintf("%s.%s.svc.%v", name, obj.Namespace, r.Domain)}, nil
 	}
 	gatewayServices := []string{}
@@ -2364,12 +2392,12 @@ func extractGatewayServices(r GatewayResources, kgw *k8s.GatewaySpec, obj config
 			Message: fmt.Sprintf("only Hostname is supported, ignoring %v", skippedAddresses),
 		}
 	}
-	if _, f := obj.Annotations[serviceTypeOverride]; f {
+	if _, f := obj.Annotations[annotation.NetworkingServiceType.Name]; f {
 		// Give error but return services, this is a soft failure
 		// Remove entirely in 1.20
 		return gatewayServices, &ConfigError{
 			Reason:  DeprecateFieldUsage,
-			Message: fmt.Sprintf("annotation %v is deprecated, use Spec.Infrastructure.Routeability", serviceTypeOverride),
+			Message: fmt.Sprintf("annotation %v is deprecated, use Spec.Infrastructure.Routeability", annotation.NetworkingServiceType.Name),
 		}
 	}
 	return gatewayServices, nil
@@ -2431,15 +2459,13 @@ func buildListener(r configContext, obj config.Config, l k8s.Listener, listenerI
 		ok = false
 	}
 	hostnames := buildHostnameMatch(obj.Namespace, r.GatewayResources, l)
-	server := &istio.Server{
-		Port: &istio.Port{
-			// Name is required. We only have one server per Gateway, so we can just name them all the same
-			Name:     "default",
-			Number:   uint32(l.Port),
-			Protocol: listenerProtocolToIstio(l.Protocol),
-		},
-		Hosts: hostnames,
-		Tls:   tls,
+	protocol, perr := listenerProtocolToIstio(controllerName, l.Protocol)
+	if perr != nil {
+		listenerConditions[string(k8s.ListenerConditionAccepted)].error = &ConfigError{
+			Reason:  string(k8s.ListenerReasonUnsupportedProtocol),
+			Message: perr.Error(),
+		}
+		ok = false
 	}
 	if controllerName == constants.ManagedGatewayMeshController {
 		if unexpectedWaypointListener(l) {
@@ -2449,14 +2475,53 @@ func buildListener(r configContext, obj config.Config, l k8s.Listener, listenerI
 			}
 		}
 	}
+	server := &istio.Server{
+		Port: &istio.Port{
+			// Name is required. We only have one server per Gateway, so we can just name them all the same
+			Name:     "default",
+			Number:   uint32(l.Port),
+			Protocol: protocol,
+		},
+		Hosts: hostnames,
+		Tls:   tls,
+	}
 
 	reportListenerCondition(listenerIndex, l, obj, listenerConditions)
 	return server, ok
 }
 
-func listenerProtocolToIstio(protocol k8s.ProtocolType) string {
-	// Currently, all gateway-api protocols are valid Istio protocols.
-	return string(protocol)
+var supportedProtocols = sets.New(
+	k8s.HTTPProtocolType,
+	k8s.HTTPSProtocolType,
+	k8s.TLSProtocolType,
+	k8s.TCPProtocolType,
+	k8s.ProtocolType(protocol.HBONE))
+
+func listenerProtocolToIstio(name k8s.GatewayController, p k8s.ProtocolType) (string, error) {
+	switch p {
+	// Standard protocol types
+	case k8s.HTTPProtocolType:
+		return string(p), nil
+	case k8s.HTTPSProtocolType:
+		return string(p), nil
+	case k8s.TLSProtocolType, k8s.TCPProtocolType:
+		if !features.EnableAlphaGatewayAPI {
+			return "", fmt.Errorf("protocol %q is supported, but only when %v=true is configured", p, features.EnableAlphaGatewayAPIName)
+		}
+		return string(p), nil
+	// Our own custom types
+	case k8s.ProtocolType(protocol.HBONE):
+		if name != constants.ManagedGatewayMeshController {
+			return "", fmt.Errorf("protocol %q is only supported for waypoint proxies", p)
+		}
+		return string(p), nil
+	}
+	up := k8s.ProtocolType(strings.ToUpper(string(p)))
+	if supportedProtocols.Contains(up) {
+		return "", fmt.Errorf("protocol %q is unsupported. hint: %q (uppercase) may be supported", p, up)
+	}
+	// Note: the k8s.UDPProtocolType is explicitly left to hit this path
+	return "", fmt.Errorf("protocol %q is unsupported", p)
 }
 
 func buildTLS(ctx configContext, tls *k8s.GatewayTLSConfig, gw config.Config, isAutoPassthrough bool) (*istio.ServerTLSSettings, *ConfigError) {

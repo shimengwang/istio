@@ -218,10 +218,10 @@ func NewWebhook(p WebhookParameters) (*Webhook, error) {
 	wh.MultiCast = mc
 	sidecarConfig, valuesConfig, err := p.Watcher.Get()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get initial configuration: %v", err)
 	}
 	if err := wh.updateConfig(sidecarConfig, valuesConfig); err != nil {
-		log.Errorf("failed to process webhook config: %v", err)
+		return nil, fmt.Errorf("failed to process webhook config: %v", err)
 	}
 
 	p.Mux.HandleFunc("/inject", wh.serveInject)
@@ -247,7 +247,7 @@ func (wh *Webhook) updateConfig(sidecarConfig *Config, valuesConfig string) erro
 	wh.Config = sidecarConfig
 	vc, err := NewValuesConfig(valuesConfig)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create new values config: %v", err)
 	}
 	wh.valuesConfig = vc
 	return nil
@@ -264,7 +264,6 @@ const (
 func moveContainer(from, to []corev1.Container, name string) ([]corev1.Container, []corev1.Container) {
 	var container *corev1.Container
 	for i, c := range from {
-		c := c
 		if from[i].Name == name {
 			from = slices.Delete(from, i)
 			container = &c
@@ -281,7 +280,6 @@ func modifyContainers(cl []corev1.Container, name string, modifier ContainerReor
 	containers := []corev1.Container{}
 	var match *corev1.Container
 	for _, c := range cl {
-		c := c
 		if c.Name != name {
 			containers = append(containers, c)
 		} else {

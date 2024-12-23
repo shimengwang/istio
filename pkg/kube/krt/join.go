@@ -30,7 +30,7 @@ type join[T any] struct {
 	synced         <-chan struct{}
 }
 
-func (j *join[T]) GetKey(k Key[T]) *T {
+func (j *join[T]) GetKey(k string) *T {
 	for _, c := range j.collections {
 		if r := c.GetKey(k); r != nil {
 			return r
@@ -41,7 +41,7 @@ func (j *join[T]) GetKey(k Key[T]) *T {
 
 func (j *join[T]) List() []T {
 	res := []T{}
-	found := sets.New[Key[T]]()
+	found := sets.New[string]()
 	for _, c := range j.collections {
 		for _, i := range c.List() {
 			key := GetKey(i)
@@ -79,12 +79,10 @@ func (j *join[T]) name() string { return j.collectionName }
 func (j *join[T]) uid() collectionUID { return j.id }
 
 // nolint: unused // (not true, its to implement an interface)
-func (j *join[I]) dump() {
-	log.Errorf("> BEGIN DUMP (join %v)", j.collectionName)
-	for _, c := range j.collections {
-		c.dump()
-	}
-	log.Errorf("< END DUMP (join %v)", j.collectionName)
+func (j *join[I]) dump() CollectionDump {
+	// Dump should not be used on join; instead its preferred to enroll each individual collection. Maybe reconsider
+	// in the future if there is a need
+	return CollectionDump{}
 }
 
 // nolint: unused // (not true)

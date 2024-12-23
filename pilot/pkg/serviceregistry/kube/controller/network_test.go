@@ -26,6 +26,7 @@ import (
 	k8sv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
 
+	"istio.io/api/annotation"
 	"istio.io/api/label"
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pilot/pkg/features"
@@ -57,7 +58,7 @@ func TestNetworkUpdateTriggers(t *testing.T) {
 		t.Fatal("did not expect any gateways yet")
 	}
 
-	notifyCh := make(chan struct{}, 1)
+	notifyCh := make(chan struct{}, 10)
 	var (
 		gwMu sync.Mutex
 		gws  []model.NetworkGateway
@@ -79,48 +80,52 @@ func TestNetworkUpdateTriggers(t *testing.T) {
 	})
 	expectGateways := func(t *testing.T, expectedGws int) {
 		// wait for a notification
-		assert.ChannelHasItem(t, notifyCh)
-		if n := len(getGws()); n != expectedGws {
-			t.Errorf("expected %d gateways but got %d", expectedGws, n)
+		// We may get up to 3 since we are creating 2 services, though sometimes it is collapsed into a single event depending no timing
+		for range 3 {
+			assert.ChannelHasItem(t, notifyCh)
+			if n := len(getGws()); n == expectedGws {
+				return
+			}
 		}
+		t.Errorf("expected %d gateways but got %v", expectedGws, getGws())
 	}
 
 	t.Run("add meshnetworks", func(t *testing.T) {
 		addMeshNetworksFromRegistryGateway(t, c, meshNetworks)
-		expectGateways(t, 2)
+		expectGateways(t, 3)
 	})
 	t.Run("add labeled service", func(t *testing.T) {
 		addLabeledServiceGateway(t, c, "nw0")
-		expectGateways(t, 3)
+		expectGateways(t, 4)
 	})
 	t.Run("update labeled service network", func(t *testing.T) {
 		addLabeledServiceGateway(t, c, "nw1")
-		expectGateways(t, 3)
+		expectGateways(t, 4)
 	})
 	t.Run("add kubernetes gateway", func(t *testing.T) {
 		addOrUpdateGatewayResource(t, c, 35443)
-		expectGateways(t, 7)
+		expectGateways(t, 8)
 	})
 	t.Run("update kubernetes gateway", func(t *testing.T) {
 		addOrUpdateGatewayResource(t, c, 45443)
-		expectGateways(t, 7)
+		expectGateways(t, 8)
 	})
 	t.Run("remove kubernetes gateway", func(t *testing.T) {
 		removeGatewayResource(t, c)
-		expectGateways(t, 3)
+		expectGateways(t, 4)
 	})
 	t.Run("remove labeled service", func(t *testing.T) {
 		removeLabeledServiceGateway(t, c)
-		expectGateways(t, 2)
+		expectGateways(t, 3)
 	})
 	// gateways are created even with out service
 	t.Run("add kubernetes gateway", func(t *testing.T) {
 		addOrUpdateGatewayResource(t, c, 35443)
-		expectGateways(t, 6)
+		expectGateways(t, 7)
 	})
 	t.Run("remove kubernetes gateway", func(t *testing.T) {
 		removeGatewayResource(t, c)
-		expectGateways(t, 2)
+		expectGateways(t, 3)
 	})
 	t.Run("remove meshnetworks", func(t *testing.T) {
 		meshNetworks.SetNetworks(nil)
@@ -205,6 +210,17 @@ func addMeshNetworksFromRegistryGateway(t *testing.T, c *FakeController, watcher
 			Ports: []corev1.PortStatus{{Port: 15443, Protocol: corev1.ProtocolTCP}},
 		}}}},
 	})
+	clienttest.Wrap(t, c.services).Create(&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "istio-meshnetworks-gw-2", Namespace: "istio-system"},
+		Spec: corev1.ServiceSpec{
+			Type:  corev1.ServiceTypeLoadBalancer,
+			Ports: []corev1.ServicePort{{Port: 15443, Protocol: corev1.ProtocolTCP}},
+		},
+		Status: corev1.ServiceStatus{LoadBalancer: corev1.LoadBalancerStatus{Ingress: []corev1.LoadBalancerIngress{{
+			IP:    "1.2.3.5",
+			Ports: []corev1.PortStatus{{Port: 15443, Protocol: corev1.ProtocolTCP}},
+		}}}},
+	})
 	watcher.SetNetworks(&meshconfig.MeshNetworks{Networks: map[string]*meshconfig.Network{
 		"nw0": {
 			Endpoints: []*meshconfig.Network_NetworkEndpoints{{
@@ -222,6 +238,15 @@ func addMeshNetworksFromRegistryGateway(t *testing.T, c *FakeController, watcher
 			Gateways: []*meshconfig.Network_IstioNetworkGateway{{
 				Port: 15443,
 				Gw:   &meshconfig.Network_IstioNetworkGateway_RegistryServiceName{RegistryServiceName: "istio-meshnetworks-gw.istio-system.svc.cluster.local"},
+			}},
+		},
+		"nw2": {
+			Endpoints: []*meshconfig.Network_NetworkEndpoints{{
+				Ne: &meshconfig.Network_NetworkEndpoints_FromRegistry{FromRegistry: "Kubernetes"},
+			}},
+			Gateways: []*meshconfig.Network_IstioNetworkGateway{{
+				Port: 15443,
+				Gw:   &meshconfig.Network_IstioNetworkGateway_RegistryServiceName{RegistryServiceName: "istio-meshnetworks-gw-2.istio-system.svc.cluster.local"},
 			}},
 		},
 	}})
@@ -364,10 +389,10 @@ func TestAmbientSync(t *testing.T) {
 			Name:      "remote-beta",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"gateway.istio.io/service-account": "eastwest-istio-eastwest",
+				annotation.GatewayServiceAccount.Name: "eastwest-istio-eastwest",
 			},
 			Labels: map[string]string{
-				"topology.istio.io/network": "beta",
+				label.TopologyNetwork.Name: "beta",
 			},
 		},
 		Spec: v1beta1.GatewaySpec{

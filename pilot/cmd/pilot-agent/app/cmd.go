@@ -16,6 +16,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -41,7 +42,6 @@ import (
 	"istio.io/istio/pkg/util/protomarshal"
 	"istio.io/istio/pkg/util/sets"
 	"istio.io/istio/pkg/version"
-	cleaniptables "istio.io/istio/tools/istio-clean-iptables/pkg/cmd"
 	iptables "istio.io/istio/tools/istio-iptables/pkg/cmd"
 	iptableslog "istio.io/istio/tools/istio-iptables/pkg/log"
 )
@@ -80,7 +80,6 @@ func NewRootCommand(sds istioagent.SDSServiceFactory) *cobra.Command {
 	rootCmd.AddCommand(waitCmd)
 	rootCmd.AddCommand(version.CobraCommand())
 	rootCmd.AddCommand(iptables.GetCommand(loggingOptions))
-	rootCmd.AddCommand(cleaniptables.GetCommand(loggingOptions))
 
 	rootCmd.AddCommand(collateral.CobraCommand(rootCmd, collateral.Metadata{
 		Title:   "Istio Pilot Agent",
@@ -140,8 +139,8 @@ func newProxyCommand(sds istioagent.SDSServiceFactory) *cobra.Command {
 			}
 			agentOptions := options.NewAgentOptions(&proxyArgs, proxyConfig, sds)
 			agent := istioagent.NewAgent(proxyConfig, agentOptions, secOpts, envoyOptions)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(errors.New("application shutdown"))
 			defer agent.Close()
 
 			// If a status port was provided, start handling status probes.
@@ -204,7 +203,7 @@ func initStatusServer(
 	envoyPrometheusPort int,
 	enableProfiling bool,
 	agent *istioagent.Agent,
-	shutdown context.CancelFunc,
+	shutdown context.CancelCauseFunc,
 ) error {
 	o := options.NewStatusServerOptions(proxyArgs.IsIPv6(), proxyArgs.Type, proxyConfig, agent)
 	o.EnvoyPrometheusPort = envoyPrometheusPort

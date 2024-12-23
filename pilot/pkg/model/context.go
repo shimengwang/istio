@@ -523,7 +523,7 @@ func compareVersion(ov, nv int) int {
 	return 1
 }
 
-func (node *Proxy) VersionGreaterAndEqual(inv *IstioVersion) bool {
+func (node *Proxy) VersionGreaterOrEqual(inv *IstioVersion) bool {
 	if inv == nil {
 		return true
 	}
@@ -1043,13 +1043,6 @@ func (node *Proxy) DeleteWatchedResource(typeURL string) {
 	defer node.Unlock()
 
 	delete(node.WatchedResources, typeURL)
-}
-
-// SupportsEnvoyExtendedJwt indicates that the proxy JWT extension is capable of
-// replacing istio_authn filter.
-func (node *Proxy) SupportsEnvoyExtendedJwt() bool {
-	return node.IstioVersion == nil ||
-		node.IstioVersion.Compare(&IstioVersion{Major: 1, Minor: 21, Patch: -1}) >= 0
 }
 
 type GatewayController interface {

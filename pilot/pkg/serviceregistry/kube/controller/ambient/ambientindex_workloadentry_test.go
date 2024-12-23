@@ -20,11 +20,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"istio.io/api/label"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/schema/gvk"
-	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/util/assert"
 	"istio.io/istio/pkg/workloadapi"
 )
@@ -128,8 +128,8 @@ func TestAmbientIndex_WorkloadEntries(t *testing.T) {
 	// Add a waypoint proxy pod for namespace
 	s.addPods(t, "127.0.0.200", "waypoint-ns-pod", "namespace-wide",
 		map[string]string{
-			constants.ManagedGatewayLabel: constants.ManagedGatewayMeshControllerLabel,
-			constants.GatewayNameLabel:    "waypoint-ns",
+			label.GatewayManaged.Name:                    constants.ManagedGatewayMeshControllerLabel,
+			label.IoK8sNetworkingGatewayGatewayName.Name: "waypoint-ns",
 		}, nil, true, corev1.PodRunning)
 	s.assertAddresses(t, "", "name1", "name2", "name3", "waypoint-ns-pod")
 	s.assertEvent(t, s.podXdsName("waypoint-ns-pod"))
@@ -138,7 +138,7 @@ func TestAmbientIndex_WorkloadEntries(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: testNS,
 			Labels: map[string]string{
-				constants.AmbientUseWaypointLabel: "waypoint-ns",
+				label.IoIstioUseWaypoint.Name: "waypoint-ns",
 			},
 		},
 	})
@@ -150,10 +150,10 @@ func TestAmbientIndex_WorkloadEntries(t *testing.T) {
 	)
 	// create the waypoint service
 	s.addService(t, "waypoint-ns",
-		map[string]string{constants.ManagedGatewayLabel: constants.ManagedGatewayMeshControllerLabel}, // labels
+		map[string]string{label.GatewayManaged.Name: constants.ManagedGatewayMeshControllerLabel}, // labels
 		map[string]string{}, // annotations
 		[]int32{80},
-		map[string]string{constants.GatewayNameLabel: "waypoint-ns"}, // selector
+		map[string]string{label.IoK8sNetworkingGatewayGatewayName.Name: "waypoint-ns"}, // selector
 		"10.0.0.2",
 	)
 	s.assertEvent(t, s.podXdsName("waypoint-ns-pod"),
@@ -168,8 +168,8 @@ func TestAmbientIndex_WorkloadEntries(t *testing.T) {
 	// Add another one, expect the same result
 	s.addPods(t, "127.0.0.201", "waypoint2-ns-pod", "namespace-wide",
 		map[string]string{
-			constants.ManagedGatewayLabel: constants.ManagedGatewayMeshControllerLabel,
-			constants.GatewayNameLabel:    "waypoint-ns",
+			label.GatewayManaged.Name:                    constants.ManagedGatewayMeshControllerLabel,
+			label.IoK8sNetworkingGatewayGatewayName.Name: "waypoint-ns",
 		}, nil, true, corev1.PodRunning)
 	s.assertAddresses(t, "", "name1", "name2", "name3", "waypoint-ns", "waypoint-ns-pod", "waypoint2-ns-pod")
 	// all these workloads already have a waypoint, only expect the new waypoint pod
@@ -213,7 +213,7 @@ func TestAmbientIndex_WorkloadEntries(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: testNS,
 			Labels: map[string]string{
-				constants.AmbientUseWaypointLabel: "none",
+				label.IoIstioUseWaypoint.Name: "none",
 			},
 		},
 	})
@@ -345,8 +345,10 @@ func TestAmbientIndex_InlinedWorkloadEntries(t *testing.T) {
 }
 
 func TestAmbientIndex_WorkloadEntries_DisableK8SServiceSelectWorkloadEntries(t *testing.T) {
-	test.SetForTest(t, &features.EnableK8SServiceSelectWorkloadEntries, false)
-	s := newAmbientTestServer(t, testC, testNW)
+	s := newAmbientTestServerWithFlags(t, testC, testNW, FeatureFlags{
+		DefaultAllowFromWaypoint:              features.DefaultAllowFromWaypoint,
+		EnableK8SServiceSelectWorkloadEntries: false,
+	})
 
 	s.addWorkloadEntries(t, "127.0.0.1", "name1", "sa1", map[string]string{"app": "a"})
 	s.assertEvent(t, s.wleXdsName("name1"))

@@ -222,8 +222,7 @@ func ConvertWorkloadEntry(cfg config.Config) *networking.WorkloadEntry {
 	// we will merge labels from metadata with spec, with precedence to the metadata
 	labels := maps.MergeCopy(wle.Labels, cfg.Labels)
 	// shallow copy
-	copied := &networking.WorkloadEntry{}
-	protomarshal.ShallowCopy(copied, wle)
+	copied := protomarshal.ShallowClone(wle)
 	copied.Labels = labels
 	return copied
 }
@@ -378,7 +377,7 @@ func getUpdatedConfigs(services []*model.Service) sets.Set[model.ConfigKey] {
 func (s *Controller) serviceEntryHandler(old, curr config.Config, event model.Event) {
 	log.Debugf("Handle event %s for service entry %s/%s", event, curr.Namespace, curr.Name)
 	currentServiceEntry := curr.Spec.(*networking.ServiceEntry)
-	cs := convertServices(curr, s.clusterID)
+	cs := convertServices(curr)
 	configsUpdated := sets.New[model.ConfigKey]()
 	key := curr.NamespacedName()
 

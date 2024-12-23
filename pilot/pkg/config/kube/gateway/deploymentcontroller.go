@@ -32,6 +32,7 @@ import (
 	gateway "sigs.k8s.io/gateway-api/apis/v1beta1"
 	"sigs.k8s.io/yaml"
 
+	"istio.io/api/annotation"
 	"istio.io/api/label"
 	meshapi "istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pilot/pkg/features"
@@ -181,7 +182,7 @@ func getClassInfos() map[gateway.GatewayController]classInfo {
 func NewDeploymentController(client kube.Client, clusterID cluster.ID, env *model.Environment,
 	webhookConfig func() inject.WebhookConfig, injectionHandler func(fn func()), tw revisions.TagWatcher, revision string,
 ) *DeploymentController {
-	filter := kclient.Filter{ObjectFilter: kube.FilterIfEnhancedFilteringEnabled(client)}
+	filter := kclient.Filter{ObjectFilter: client.ObjectFilter()}
 	gateways := kclient.NewFiltered[*gateway.Gateway](client, filter)
 	gatewayClasses := kclient.New[*gateway.GatewayClass](client)
 	dc := &DeploymentController{
@@ -346,14 +347,14 @@ func (d *DeploymentController) configureIstioGateway(log *istiolog.Scope, gw gat
 	defaultName := getDefaultName(gw.Name, &gw.Spec, gi.disableNameSuffix)
 
 	serviceType := gi.defaultServiceType
-	if o, f := gw.Annotations[serviceTypeOverride]; f {
+	if o, f := gw.Annotations[annotation.NetworkingServiceType.Name]; f {
 		serviceType = corev1.ServiceType(o)
 	}
 
 	input := TemplateInput{
 		Gateway:        &gw,
-		DeploymentName: model.GetOrDefault(gw.Annotations[gatewayNameOverride], defaultName),
-		ServiceAccount: model.GetOrDefault(gw.Annotations[gatewaySAOverride], defaultName),
+		DeploymentName: model.GetOrDefault(gw.Annotations[annotation.GatewayNameOverride.Name], defaultName),
+		ServiceAccount: model.GetOrDefault(gw.Annotations[annotation.GatewayServiceAccount.Name], defaultName),
 		Ports:          extractServicePorts(gw),
 		ClusterID:      d.clusterID.String(),
 
@@ -365,7 +366,7 @@ func (d *DeploymentController) configureIstioGateway(log *istiolog.Scope, gw gat
 		CompliancePolicy:          common_features.CompliancePolicy,
 		InfrastructureLabels:      gw.GetLabels(),
 		InfrastructureAnnotations: gw.GetAnnotations(),
-		GatewayNameLabel:          constants.GatewayNameLabel,
+		GatewayNameLabel:          label.IoK8sNetworkingGatewayGatewayName.Name,
 	}
 	// Default to the gateway labels/annotations and overwrite if infrastructure labels/annotations are set
 	input.InfrastructureLabels = extractInfrastructureLabels(gw)
@@ -400,16 +401,16 @@ func (d *DeploymentController) setLabelOverrides(gw gateway.Gateway, input Templ
 	isWaypointGateway := strings.Contains(string(gw.Spec.GatewayClassName), "waypoint")
 
 	var hasAmbientLabel bool
-	if _, ok := gw.Labels[constants.DataplaneModeLabel]; ok {
+	if _, ok := gw.Labels[label.IoIstioDataplaneMode.Name]; ok {
 		hasAmbientLabel = true
 	}
-	if _, ok := input.InfrastructureLabels[constants.DataplaneModeLabel]; ok {
+	if _, ok := input.InfrastructureLabels[label.IoIstioDataplaneMode.Name]; ok {
 		hasAmbientLabel = true
 	}
 	// If no ambient redirection label is set explicitly, explicitly disable.
 	// TODO this sprays ambient annotations/labels all over EVER gateway resource (serviceaccts, services, etc)
 	if features.EnableAmbientWaypoints && !isWaypointGateway && !hasAmbientLabel {
-		input.InfrastructureLabels[constants.DataplaneModeLabel] = constants.DataplaneModeNone
+		input.InfrastructureLabels[label.IoIstioDataplaneMode.Name] = constants.DataplaneModeNone
 	}
 
 	// Default the network label for waypoints if not explicitly set in gateway's labels
@@ -523,7 +524,7 @@ func (d *DeploymentController) render(templateName string, mi TemplateInput) ([]
 		return nil, fmt.Errorf("no %q template defined", templateName)
 	}
 
-	labelToMatch := map[string]string{constants.GatewayNameLabel: mi.Name}
+	labelToMatch := map[string]string{label.IoK8sNetworkingGatewayGatewayName.Name: mi.Name}
 	proxyConfig := d.env.GetProxyConfigOrDefault(mi.Namespace, labelToMatch, nil, cfg.MeshConfig)
 	input := derivedInput{
 		TemplateInput: mi,
@@ -564,7 +565,7 @@ func (d *DeploymentController) apply(controller string, yml string) error {
 	us := unstructured.Unstructured{Object: data}
 	// set managed-by label
 	clabel := strings.ReplaceAll(controller, "/", "-")
-	err = unstructured.SetNestedField(us.Object, clabel, "metadata", "labels", constants.ManagedGatewayLabel)
+	err = unstructured.SetNestedField(us.Object, clabel, "metadata", "labels", label.GatewayManaged.Name)
 	if err != nil {
 		return err
 	}
@@ -572,10 +573,7 @@ func (d *DeploymentController) apply(controller string, yml string) error {
 	if err != nil {
 		return err
 	}
-	j, err := json.Marshal(us.Object)
-	if err != nil {
-		return err
-	}
+
 	canManage, resourceVersion := d.canManage(gvr, us.GetName(), us.GetNamespace())
 	if !canManage {
 		log.Debugf("skipping %v/%v/%v, already managed", gvr, us.GetName(), us.GetNamespace())
@@ -584,6 +582,21 @@ func (d *DeploymentController) apply(controller string, yml string) error {
 	// Ensure our canManage assertion is not stale
 	us.SetResourceVersion(resourceVersion)
 
+	// Because in 1.24 we removed old label "istio.io/gateway-name", in order to not mutate the deployment.spec.Selector during upgrade.
+	// we always use the old `selector` value
+	if gvr.Resource == "deployments" {
+		deployment := d.deployments.Get(us.GetName(), us.GetNamespace())
+		if deployment != nil && deployment.Spec.Selector.MatchLabels["istio.io/gateway-name"] != "" {
+			us.Object["spec"].(map[string]any)["selector"] = deployment.Spec.Selector
+			// nolint lll
+			us.Object["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["labels"].(map[string]any)["istio.io/gateway-name"] = deployment.Spec.Template.ObjectMeta.Labels["istio.io/gateway-name"]
+		}
+	}
+
+	j, err := json.Marshal(us.Object)
+	if err != nil {
+		return err
+	}
 	log.Debugf("applying %v", string(j))
 	if err := d.patcher(gvr, us.GetName(), us.GetNamespace(), j); err != nil {
 		return fmt.Errorf("patch %v/%v/%v: %v", us.GroupVersionKind(), us.GetNamespace(), us.GetName(), err)
@@ -614,7 +627,7 @@ func (d *DeploymentController) canManage(gvr schema.GroupVersionResource, name, 
 		// no object, we can manage it
 		return true, ""
 	}
-	_, managed := obj.GetLabels()[constants.ManagedGatewayLabel]
+	_, managed := obj.GetLabels()[label.GatewayManaged.Name]
 	// If object already exists, we can only manage it if it has the label
 	return managed, obj.GetResourceVersion()
 }

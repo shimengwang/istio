@@ -19,10 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"istio.io/api/annotation"
 	"istio.io/istio/cni/pkg/iptables"
 	"istio.io/istio/pkg/slices"
 	dep "istio.io/istio/tools/istio-iptables/pkg/dependencies"
@@ -55,7 +58,7 @@ func (s *NetServer) Start(ctx context.Context) {
 	go s.ztunnelServer.Run(ctx)
 }
 
-func (s *NetServer) Stop() {
+func (s *NetServer) Stop(_ bool) {
 	log.Debug("stopping ztunnel server")
 	s.ztunnelServer.Close()
 }
@@ -125,9 +128,11 @@ func (s *NetServer) AddPodToMesh(ctx context.Context, pod *corev1.Pod, podIPs []
 		return err
 	}
 
+	podCfg := getPodLevelTrafficOverrides(pod)
+
 	log.Debug("calling CreateInpodRules")
 	if err := s.netnsRunner(openNetns, func() error {
-		return s.podIptables.CreateInpodRules(log, HostProbeSNATIP, HostProbeSNATIPV6)
+		return s.podIptables.CreateInpodRules(log, podCfg)
 	}); err != nil {
 		log.Errorf("failed to update POD inpod: %s/%s %v", pod.Namespace, pod.Name, err)
 		return err
@@ -189,19 +194,43 @@ func (s *NetServer) scanProcForPodsAndCache(pods map[types.UID]*corev1.Pod) erro
 	return nil
 }
 
+func getPodLevelTrafficOverrides(pod *corev1.Pod) iptables.PodLevelOverrides {
+	// If true, the pod will run in 'ingress mode'. This is intended to be used for "ingress" type workloads which handle
+	// non-mesh traffic on inbound, and send to the mesh on outbound.
+	// Basically, this just disables inbound redirection.
+	podCfg := iptables.PodLevelOverrides{IngressMode: false}
+	if a, f := pod.Annotations[annotation.AmbientBypassInboundCapture.Name]; f {
+		var err error
+		podCfg.IngressMode, err = strconv.ParseBool(a)
+		if err != nil {
+			log.Warnf("annotation %v=%q found, but only '*' is supported", annotation.AmbientBypassInboundCapture.Name, a)
+		}
+	}
+
+	if virt, hasVirt := pod.Annotations[annotation.IoIstioRerouteVirtualInterfaces.Name]; hasVirt {
+		virtInterfaces := strings.Split(virt, ",")
+		for _, splitVirt := range virtInterfaces {
+			trim := strings.TrimSpace(splitVirt)
+			if trim != "" {
+				podCfg.VirtualInterfaces = append(podCfg.VirtualInterfaces, trim)
+			}
+		}
+	}
+
+	return podCfg
+}
+
 func realDependenciesHost() *dep.RealDependencies {
 	return &dep.RealDependencies{
-		// We are in the host FS *and* the Host network
-		HostFilesystemPodNetwork: false,
-		NetworkNamespace:         "",
+		UsePodScopedXtablesLock: false,
+		NetworkNamespace:        "",
 	}
 }
 
-func realDependenciesInpod() *dep.RealDependencies {
+func realDependenciesInpod(useScopedLocks bool) *dep.RealDependencies {
 	return &dep.RealDependencies{
-		// We are running the host FS, but the pod network -- setup rules differently (locking, etc)
-		HostFilesystemPodNetwork: true,
-		NetworkNamespace:         "",
+		UsePodScopedXtablesLock: useScopedLocks,
+		NetworkNamespace:        "",
 	}
 }
 
@@ -224,7 +253,7 @@ func (s *NetServer) RemovePodFromMesh(ctx context.Context, pod *corev1.Pod, isDe
 		if openNetns != nil {
 			// pod is removed from the mesh, but is still running. remove iptables rules
 			log.Debugf("calling DeleteInpodRules")
-			if err := s.netnsRunner(openNetns, func() error { return s.podIptables.DeleteInpodRules() }); err != nil {
+			if err := s.netnsRunner(openNetns, func() error { return s.podIptables.DeleteInpodRules(log) }); err != nil {
 				return fmt.Errorf("failed to delete inpod rules: %w", err)
 			}
 		} else {

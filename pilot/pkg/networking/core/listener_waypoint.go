@@ -17,6 +17,7 @@ package core
 import (
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoymatcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	any "google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
@@ -53,6 +55,7 @@ import (
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/proto"
 	"istio.io/istio/pkg/slices"
+	"istio.io/istio/pkg/util/sets"
 	"istio.io/istio/pkg/wellknown"
 )
 
@@ -262,10 +265,10 @@ func (lb *ListenerBuilder) buildWaypointInternal(wls []model.WorkloadInfo, svcs 
 				chains = append(chains, tcpChain)
 				portMapper.Map[portString] = match.ToChain(tcpChain.Name)
 				// TCP and HTTP on the same port, mark it as requiring sniffing
-				if portProtocols[port.Port] != "" && portProtocols[port.Port] != protocol.TCP {
+				if portProtocols[port.Port] != "" && !portProtocols[port.Port].IsTCP() {
 					portProtocols[port.Port] = protocol.Unsupported
 				} else {
-					portProtocols[port.Port] = protocol.TCP
+					portProtocols[port.Port] = port.Protocol
 				}
 			}
 		}
@@ -363,6 +366,29 @@ func (lb *ListenerBuilder) buildWaypointInternal(wls []model.WorkloadInfo, svcs 
 			}
 		}
 	}
+	tlsInspector := func() *listener.ListenerFilter {
+		tlsPorts := sets.New[int]()
+		nonTLSPorts := sets.New[int]()
+		for _, s := range svcs {
+			for _, p := range s.Ports {
+				if p.Protocol.IsTLS() {
+					tlsPorts.Insert(p.Port)
+				} else {
+					nonTLSPorts.Insert(p.Port)
+				}
+			}
+		}
+		nonInspectorPorts := nonTLSPorts.DeleteAll(tlsPorts.UnsortedList()...).UnsortedList()
+		if len(nonInspectorPorts) > 0 {
+			slices.Sort(nonInspectorPorts)
+			return &listener.ListenerFilter{
+				Name:           wellknown.TLSInspector,
+				ConfigType:     xdsfilters.TLSInspector.ConfigType,
+				FilterDisabled: listenerPredicateExcludePorts(nonInspectorPorts),
+			}
+		}
+		return nil
+	}()
 	l := &listener.Listener{
 		Name:              MainInternalName,
 		ListenerSpecifier: &listener.Listener_InternalListener{InternalListener: &listener.Listener_InternalListenerConfig{}},
@@ -385,6 +411,9 @@ func (lb *ListenerBuilder) buildWaypointInternal(wls []model.WorkloadInfo, svcs 
 				},
 			},
 		},
+	}
+	if tlsInspector != nil {
+		l.ListenerFilters = append(l.ListenerFilters, tlsInspector)
 	}
 	accessLogBuilder.setListenerAccessLog(lb.push, lb.node, l, istionetworking.ListenerClassSidecarInbound)
 	return l
@@ -438,10 +467,10 @@ func (lb *ListenerBuilder) buildWaypointHTTPFilters(svc *model.Service) (pre []*
 
 	// TODO: consider dedicated listener class for waypoint filters
 	cls := istionetworking.ListenerClassSidecarInbound
-	wasm := lb.push.WasmPluginsByListenerInfo(lb.node, model.WasmPluginListenerInfo{
-		Class:   cls,
-		Service: svc,
-	}, model.WasmPluginTypeHTTP)
+	wasm := lb.push.WasmPluginsByListenerInfo(lb.node,
+		model.WasmPluginListenerInfo{Class: cls}.WithService(svc),
+		model.WasmPluginTypeHTTP,
+	)
 	// TODO: how to deal with ext-authz? It will be in the ordering twice
 	// TODO policies here will need to be different per-chain (service attached)
 	pre = append(pre, authzCustomBuilder.BuildHTTP(cls)...)
@@ -563,14 +592,14 @@ func (lb *ListenerBuilder) waypointInboundRoute(virtualService config.Config, li
 	catchall := false
 	for _, http := range vs.Http {
 		if len(http.Match) == 0 {
-			if r := lb.translateRoute(virtualService, http, nil, listenPort); r != nil {
+			if r := lb.translateWaypointRoute(virtualService, http, nil, listenPort); r != nil {
 				out = append(out, r)
 			}
 			// This is a catchall route, so we can stop processing the rest of the routes.
 			break
 		}
 		for _, match := range http.Match {
-			if r := lb.translateRoute(virtualService, http, match, listenPort); r != nil {
+			if r := lb.translateWaypointRoute(virtualService, http, match, listenPort); r != nil {
 				out = append(out, r)
 				// This is a catch all path. Routes are matched in order, so we will never go beyond this match
 				// As an optimization, we can just stop sending any more routes here.
@@ -591,14 +620,15 @@ func (lb *ListenerBuilder) waypointInboundRoute(virtualService config.Config, li
 	return out, nil
 }
 
-func (lb *ListenerBuilder) translateRoute(
+func (lb *ListenerBuilder) translateWaypointRoute(
 	virtualService config.Config,
 	in *networking.HTTPRoute,
 	match *networking.HTTPMatchRequest,
 	listenPort int,
 ) *route.Route {
+	gatewaySemantics := model.UseGatewaySemantics(virtualService)
 	// When building routes, it's okay if the target cluster cannot be
-	// resolved Traffic to such clusters will blackhole.
+	// resolved. Traffic to such clusters will blackhole.
 
 	// Match by the destination port specified in the match condition
 	if match != nil && match.Port != 0 && match.Port != uint32(listenPort) {
@@ -612,7 +642,7 @@ func (lb *ListenerBuilder) translateRoute(
 
 	out := &route.Route{
 		Name:     routeName,
-		Match:    istio_route.TranslateRouteMatch(virtualService, match, true),
+		Match:    istio_route.TranslateRouteMatch(virtualService, match),
 		Metadata: util.BuildConfigInfoMetadata(virtualService.Meta),
 	}
 	authority := ""
@@ -630,7 +660,7 @@ func (lb *ListenerBuilder) translateRoute(
 	} else if in.DirectResponse != nil {
 		istio_route.ApplyDirectResponse(out, in.DirectResponse)
 	} else {
-		lb.routeDestination(out, in, authority, listenPort)
+		lb.waypointRouteDestination(out, in, authority, listenPort, gatewaySemantics)
 	}
 
 	out.Decorator = &route.Decorator{
@@ -649,7 +679,13 @@ func (lb *ListenerBuilder) translateRoute(
 	return out
 }
 
-func (lb *ListenerBuilder) routeDestination(out *route.Route, in *networking.HTTPRoute, authority string, listenerPort int) {
+func (lb *ListenerBuilder) waypointRouteDestination(
+	out *route.Route,
+	in *networking.HTTPRoute,
+	authority string,
+	listenerPort int,
+	gatewaySemantics bool,
+) {
 	policy := in.Retries
 	if policy == nil {
 		// No VS policy set, use mesh defaults
@@ -665,13 +701,39 @@ func (lb *ListenerBuilder) routeDestination(out *route.Route, in *networking.HTT
 		action.Timeout = in.Timeout
 	}
 	// Use deprecated value for now as the replacement MaxStreamDuration has some regressions.
+	// TODO: check and see if the replacement has been fixed.
 	// nolint: staticcheck
 	action.MaxGrpcTimeout = action.Timeout
 
+	if gatewaySemantics {
+		// return 500 for invalid backends
+		// https://github.com/kubernetes-sigs/gateway-api/blob/cea484e38e078a2c1997d8c7a62f410a1540f519/apis/v1beta1/httproute_types.go#L204
+		action.ClusterNotFoundResponseCode = route.RouteAction_INTERNAL_SERVER_ERROR
+	}
 	out.Action = &route.Route_Route{Route: action}
 
 	if in.Rewrite != nil {
-		action.PrefixRewrite = in.Rewrite.GetUri()
+		if regexRewrite := in.Rewrite.GetUriRegexRewrite(); regexRewrite != nil {
+			action.RegexRewrite = &envoymatcher.RegexMatchAndSubstitute{
+				Pattern: &envoymatcher.RegexMatcher{
+					Regex: regexRewrite.Match,
+				},
+				Substitution: regexRewrite.Rewrite,
+			}
+		} else if uri := in.Rewrite.GetUri(); uri != "" {
+			if gatewaySemantics && uri == "/" {
+				// remove the prefix
+				action.RegexRewrite = &envoymatcher.RegexMatchAndSubstitute{
+					Pattern: &envoymatcher.RegexMatcher{
+						Regex: fmt.Sprintf(`^%s(/?)(.*)`, regexp.QuoteMeta(out.Match.GetPathSeparatedPrefix())),
+					},
+					// hold `/` in case the entire path is removed
+					Substitution: `/\2`,
+				}
+			} else {
+				action.PrefixRewrite = uri
+			}
+		}
 		if in.Rewrite.GetAuthority() != "" {
 			authority = in.Rewrite.GetAuthority()
 		}
@@ -684,14 +746,16 @@ func (lb *ListenerBuilder) routeDestination(out *route.Route, in *networking.HTT
 
 	if in.Mirror != nil {
 		if mp := istio_route.MirrorPercent(in); mp != nil {
+			cluster := lb.getWaypointDestinationCluster(in.Mirror, lb.serviceForHostname(host.Name(in.Mirror.Host)), listenerPort)
 			action.RequestMirrorPolicies = append(action.RequestMirrorPolicies,
-				istio_route.TranslateRequestMirrorPolicy(in.Mirror, lb.serviceForHostname(host.Name(in.Mirror.Host)), listenerPort, mp))
+				istio_route.TranslateRequestMirrorPolicyCluster(cluster, mp))
 		}
 	}
 	for _, mirror := range in.Mirrors {
 		if mp := istio_route.MirrorPercentByPolicy(mirror); mp != nil && mirror.Destination != nil {
+			cluster := lb.getWaypointDestinationCluster(mirror.Destination, lb.serviceForHostname(host.Name(mirror.Destination.Host)), listenerPort)
 			action.RequestMirrorPolicies = append(action.RequestMirrorPolicies,
-				istio_route.TranslateRequestMirrorPolicy(mirror.Destination, lb.serviceForHostname(host.Name(mirror.Destination.Host)), listenerPort, mp))
+				istio_route.TranslateRequestMirrorPolicyCluster(cluster, mp))
 		}
 	}
 
@@ -709,7 +773,7 @@ func (lb *ListenerBuilder) routeDestination(out *route.Route, in *networking.HTT
 			}
 		}
 		hostname := host.Name(dst.GetDestination().GetHost())
-		n := lb.GetDestinationCluster(dst.Destination, lb.serviceForHostname(hostname), listenerPort)
+		n := lb.getWaypointDestinationCluster(dst.Destination, lb.serviceForHostname(hostname), listenerPort)
 		clusterWeight := &route.WeightedCluster_ClusterWeight{
 			Name:   n,
 			Weight: weight,
@@ -756,9 +820,13 @@ func (lb *ListenerBuilder) routeDestination(out *route.Route, in *networking.HTT
 	}
 }
 
-// GetDestinationCluster generates a cluster name for the route, or error if no cluster
-// can be found. Called by translateRule to determine if
-func (lb *ListenerBuilder) GetDestinationCluster(destination *networking.Destination, service *model.Service, listenerPort int) string {
+// getWaypointDestinationCluster generates a cluster name for the route. If the destination is invalid
+// or cannot be found, "UnknownService" is returned.
+func (lb *ListenerBuilder) getWaypointDestinationCluster(destination *networking.Destination, service *model.Service, listenerPort int) string {
+	if len(destination.GetHost()) == 0 {
+		// only happens when the gateway-api BackendRef is invalid
+		return "UnknownService"
+	}
 	dir, port := model.TrafficDirectionInboundVIP, listenerPort
 
 	if destination.GetPort() != nil {
@@ -793,10 +861,14 @@ func (lb *ListenerBuilder) GetDestinationCluster(destination *networking.Destina
 
 // portToSubset helps translate a port to the waypoint subset to use
 func portToSubset(service *model.Service, port int, destination *networking.Destination) string {
-	p, ok := service.Ports.GetByPort(port)
+	var p *model.Port
+	var ok bool
+	if service != nil {
+		p, ok = service.Ports.GetByPort(port)
+	}
 	if !ok {
 		// Port is unknown.
-		if destination.Subset != "" {
+		if destination != nil && destination.Subset != "" {
 			return "http/" + destination.Subset
 		}
 		return "http"

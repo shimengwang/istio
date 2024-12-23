@@ -19,11 +19,11 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
+	"istio.io/api/label"
 	"istio.io/api/type/v1beta1"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
 	"istio.io/istio/pkg/config"
-	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/test"
@@ -57,12 +57,12 @@ func TestPolicyMatcher(t *testing.T) {
 	}
 	sampleGatewaySelector := &v1beta1.WorkloadSelector{
 		MatchLabels: labels.Instance{
-			constants.GatewayNameLabel: "sample-gateway",
+			label.IoK8sNetworkingGatewayGatewayName.Name: "sample-gateway",
 		},
 	}
 	sampleWaypointSelector := &v1beta1.WorkloadSelector{
 		MatchLabels: labels.Instance{
-			constants.GatewayNameLabel: "sample-waypoint",
+			label.IoK8sNetworkingGatewayGatewayName.Name: "sample-waypoint",
 		},
 	}
 	regularApp := WorkloadPolicyMatcher{
@@ -75,38 +75,34 @@ func TestPolicyMatcher(t *testing.T) {
 	sampleGateway := WorkloadPolicyMatcher{
 		WorkloadNamespace: "default",
 		WorkloadLabels: labels.Instance{
-			constants.GatewayNameLabel: "sample-gateway",
+			label.IoK8sNetworkingGatewayGatewayName.Name: "sample-gateway",
 		},
 		IsWaypoint: false,
 	}
 	sampleWaypoint := WorkloadPolicyMatcher{
 		WorkloadNamespace: "default",
 		WorkloadLabels: labels.Instance{
-			constants.GatewayNameLabel: "sample-waypoint",
+			label.IoK8sNetworkingGatewayGatewayName.Name: "sample-waypoint",
 		},
 		IsWaypoint: true,
 	}
 	serviceTarget := WorkloadPolicyMatcher{
 		WorkloadNamespace: "default",
 		WorkloadLabels: labels.Instance{
-			"app":                      "my-app",
-			constants.GatewayNameLabel: "sample-waypoint",
+			"app": "my-app",
+			label.IoK8sNetworkingGatewayGatewayName.Name: "sample-waypoint",
 		},
-		IsWaypoint:       true,
-		Service:          "sample-svc",
-		ServiceNamespace: "default",
-		ServiceRegistry:  provider.Kubernetes,
+		IsWaypoint: true,
+		Services:   []ServiceInfoForPolicyMatcher{{Name: "sample-svc", Namespace: "default", Registry: provider.Kubernetes}},
 	}
 	serviceEntryTarget := WorkloadPolicyMatcher{
 		WorkloadNamespace: "default",
 		WorkloadLabels: labels.Instance{
-			"app":                      "my-app",
-			constants.GatewayNameLabel: "sample-waypoint",
+			"app": "my-app",
+			label.IoK8sNetworkingGatewayGatewayName.Name: "sample-waypoint",
 		},
-		IsWaypoint:       true,
-		ServiceNamespace: "default",
-		Service:          "sample-svc-entry",
-		ServiceRegistry:  provider.External,
+		IsWaypoint: true,
+		Services:   []ServiceInfoForPolicyMatcher{{Name: "sample-svc-entry", Namespace: "default", Registry: provider.External}},
 	}
 	tests := []struct {
 		name                   string
@@ -300,6 +296,46 @@ func TestPolicyMatcher(t *testing.T) {
 					Kind:  gvk.ServiceEntry.Kind,
 					Name:  "sample-svc",
 				}},
+			},
+			enableSelectorPolicies: false,
+			expected:               false,
+		},
+		{
+			name:      "gateway attached policy with service",
+			selection: serviceTarget,
+			policy: &mockPolicyTargetGetter{
+				targetRefs: []*v1beta1.PolicyTargetReference{waypointTargetRef},
+			},
+			enableSelectorPolicies: false,
+			expected:               true,
+		},
+		{
+			name: "gateway attached policy with multi-service",
+			// selection: serviceTarget,
+			selection: func() WorkloadPolicyMatcher {
+				base := serviceTarget
+				base.Services = append(base.Services, ServiceInfoForPolicyMatcher{Name: "sample-svc-1", Namespace: "default", Registry: provider.Kubernetes})
+				return base
+			}(),
+			policy: &mockPolicyTargetGetter{
+				targetRefs: []*v1beta1.PolicyTargetReference{waypointTargetRef},
+			},
+			enableSelectorPolicies: false,
+			expected:               true,
+		},
+		{
+			name: "gateway attached policy with cross-namespace service",
+			selection: func() WorkloadPolicyMatcher {
+				base := serviceTarget
+				// Waypoint is in 'waypoint'
+				base.WorkloadNamespace = "waypoint"
+				// Policy and service are in default
+				base.Services = []ServiceInfoForPolicyMatcher{{Name: "sample-svc", Namespace: "default", Registry: provider.Kubernetes}}
+				return base
+			}(),
+			// Policy points to a waypoint.. but its in the wrong namespace
+			policy: &mockPolicyTargetGetter{
+				targetRefs: []*v1beta1.PolicyTargetReference{waypointTargetRef},
 			},
 			enableSelectorPolicies: false,
 			expected:               false,

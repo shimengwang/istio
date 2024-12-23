@@ -102,11 +102,6 @@ func TestInjection(t *testing.T) {
 			setFlags: []string{"values.global.imagePullPolicy=Never"},
 		},
 		{
-			in:       "enable-core-dump.yaml",
-			want:     "enable-core-dump.yaml.injected",
-			setFlags: []string{"values.global.proxy.enableCoreDump=true"},
-		},
-		{
 			in:   "format-duration.yaml",
 			want: "format-duration.yaml.injected",
 			mesh: func(m *meshapi.MeshConfig) {
@@ -139,6 +134,17 @@ func TestInjection(t *testing.T) {
 			// Verifies that the kubevirtInterfaces list are applied properly from parameters..
 			in:   "kubevirtInterfaces.yaml",
 			want: "kubevirtInterfaces.yaml.injected",
+			setFlags: []string{
+				`values.global.proxy.statusPort=123`,
+				`values.global.proxy.readinessInitialDelaySeconds=100`,
+				`values.global.proxy.readinessPeriodSeconds=200`,
+				`values.global.proxy.readinessFailureThreshold=300`,
+			},
+		},
+		{
+			// Verifies that the kubevirtInterfaces list are applied properly from parameters..
+			in:   "reroute-virtual-interfaces.yaml",
+			want: "reroute-virtual-interfaces.yaml.injected",
 			setFlags: []string{
 				`values.global.proxy.statusPort=123`,
 				`values.global.proxy.readinessInitialDelaySeconds=100`,
@@ -329,6 +335,34 @@ func TestInjection(t *testing.T) {
 			},
 		},
 		{
+			in:   "native-sidecar-opt-in.yaml",
+			want: "native-sidecar-opt-in.yaml.injected",
+			setup: func(t test.Failer) {
+				test.SetEnvForTest(t, features.EnableNativeSidecars.Name, "true")
+			},
+		},
+		{
+			in:   "native-sidecar-opt-in.yaml",
+			want: "native-sidecar-opt-in.yaml.injected",
+			setup: func(t test.Failer) {
+				test.SetEnvForTest(t, features.EnableNativeSidecars.Name, "false")
+			},
+		},
+		{
+			in:   "native-sidecar-opt-out.yaml",
+			want: "native-sidecar-opt-out.yaml.injected",
+			setup: func(t test.Failer) {
+				test.SetEnvForTest(t, features.EnableNativeSidecars.Name, "true")
+			},
+		},
+		{
+			in:   "native-sidecar-opt-out.yaml",
+			want: "native-sidecar-opt-out.yaml.injected",
+			setup: func(t test.Failer) {
+				test.SetEnvForTest(t, features.EnableNativeSidecars.Name, "false")
+			},
+		},
+		{
 			in:         "custom-template.yaml",
 			want:       "custom-template.yaml.injected",
 			inFilePath: "custom-template.iop.yaml",
@@ -452,7 +486,6 @@ func TestInjection(t *testing.T) {
 	// Preload default settings. Computation here is expensive, so this speeds the tests up substantially
 	defaultTemplate, defaultValues, defaultMesh := readInjectionSettings(t, "default")
 	for i, c := range cases {
-		i, c := i, c
 		testName := fmt.Sprintf("[%02d] %s", i, c.want)
 		if c.expectedError != "" {
 			testName = fmt.Sprintf("[%02d] %s", i, c.in)
@@ -1000,7 +1033,6 @@ func TestAppendMultusNetwork(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			actual := appendMultusNetwork(tc.in, "istio-cni")

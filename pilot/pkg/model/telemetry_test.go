@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"istio.io/api/envoy/extensions/stats"
+	"istio.io/api/label"
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	tpb "istio.io/api/telemetry/v1alpha1"
 	"istio.io/api/type/v1beta1"
@@ -233,11 +234,13 @@ func newTracingConfig(providerName string, disabled bool) *TracingConfig {
 			Provider:                     &meshconfig.MeshConfig_ExtensionProvider{Name: providerName},
 			Disabled:                     disabled,
 			UseRequestIDForTraceSampling: true,
+			EnableIstioTags:              true,
 		},
 		ServerSpec: TracingSpec{
 			Provider:                     &meshconfig.MeshConfig_ExtensionProvider{Name: providerName},
 			Disabled:                     disabled,
 			UseRequestIDForTraceSampling: true,
+			EnableIstioTags:              true,
 		},
 	}
 }
@@ -294,6 +297,7 @@ func TestTracing(t *testing.T) {
 					"bar": {},
 				},
 				UseRequestIdForTraceSampling: &wrappers.BoolValue{Value: false},
+				EnableIstioTags:              &wrappers.BoolValue{Value: false},
 			},
 		},
 	}
@@ -306,6 +310,7 @@ func TestTracing(t *testing.T) {
 					"baz": {},
 				},
 				UseRequestIdForTraceSampling: &wrappers.BoolValue{Value: true},
+				EnableIstioTags:              &wrappers.BoolValue{Value: true},
 			},
 		},
 	}
@@ -425,8 +430,8 @@ func TestTracing(t *testing.T) {
 			sidecar,
 			[]string{"envoy"},
 			&TracingConfig{
-				ClientSpec: TracingSpec{Disabled: true, UseRequestIDForTraceSampling: true},
-				ServerSpec: TracingSpec{Disabled: true, UseRequestIDForTraceSampling: true},
+				ClientSpec: TracingSpec{Disabled: true, UseRequestIDForTraceSampling: true, EnableIstioTags: true},
+				ServerSpec: TracingSpec{Disabled: true, UseRequestIDForTraceSampling: true, EnableIstioTags: true},
 			},
 		},
 		{
@@ -451,6 +456,7 @@ func TestTracing(t *testing.T) {
 						"bar": {},
 					},
 					UseRequestIDForTraceSampling: false,
+					EnableIstioTags:              false,
 				},
 			},
 		},
@@ -467,6 +473,7 @@ func TestTracing(t *testing.T) {
 						"baz": {},
 					},
 					UseRequestIDForTraceSampling: true,
+					EnableIstioTags:              true,
 				}, ServerSpec: TracingSpec{
 					Provider: &meshconfig.MeshConfig_ExtensionProvider{Name: "envoy"},
 					CustomTags: map[string]*tpb.Tracing_CustomTag{
@@ -474,6 +481,7 @@ func TestTracing(t *testing.T) {
 						"baz": {},
 					},
 					UseRequestIDForTraceSampling: true,
+					EnableIstioTags:              true,
 				},
 			},
 		},
@@ -494,6 +502,7 @@ func TestTracing(t *testing.T) {
 						"baz": {},
 					},
 					UseRequestIDForTraceSampling: true,
+					EnableIstioTags:              true,
 				},
 				ServerSpec: TracingSpec{
 					Provider:                 &meshconfig.MeshConfig_ExtensionProvider{Name: "envoy"},
@@ -503,6 +512,7 @@ func TestTracing(t *testing.T) {
 						"baz": {},
 					},
 					UseRequestIDForTraceSampling: true,
+					EnableIstioTags:              true,
 				},
 			},
 		},
@@ -521,10 +531,12 @@ func TestTracing(t *testing.T) {
 					},
 					RandomSamplingPercentage:     ptr.Of(99.9),
 					UseRequestIDForTraceSampling: true,
+					EnableIstioTags:              true,
 				},
 				ServerSpec: TracingSpec{
 					Provider:                     &meshconfig.MeshConfig_ExtensionProvider{Name: "envoy"},
 					UseRequestIDForTraceSampling: true,
+					EnableIstioTags:              true,
 				},
 			},
 		},
@@ -537,11 +549,13 @@ func TestTracing(t *testing.T) {
 				ClientSpec: TracingSpec{
 					Provider:                     &meshconfig.MeshConfig_ExtensionProvider{Name: "envoy"},
 					UseRequestIDForTraceSampling: true,
+					EnableIstioTags:              true,
 				},
 				ServerSpec: TracingSpec{
 					Provider:                     &meshconfig.MeshConfig_ExtensionProvider{Name: "envoy"},
 					Disabled:                     true,
 					UseRequestIDForTraceSampling: true,
+					EnableIstioTags:              true,
 				},
 			},
 		},
@@ -585,8 +599,8 @@ func TestTelemetryFilters(t *testing.T) {
 	waypoint := &Proxy{
 		ConfigNamespace: "default",
 		Type:            Waypoint,
-		Labels:          map[string]string{"gateway.networking.k8s.io/gateway-name": "waypoint"},
-		Metadata:        &NodeMetadata{Labels: map[string]string{"gateway.networking.k8s.io/gateway-name": "waypoint"}},
+		Labels:          map[string]string{label.IoK8sNetworkingGatewayGatewayName.Name: "waypoint"},
+		Metadata:        &NodeMetadata{Labels: map[string]string{label.IoK8sNetworkingGatewayGatewayName.Name: "waypoint"}},
 	}
 	emptyPrometheus := &tpb.Telemetry{
 		Metrics: []*tpb.Metrics{

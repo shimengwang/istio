@@ -38,7 +38,6 @@ import (
 	security_beta "istio.io/api/security/v1beta1"
 	telemetry "istio.io/api/telemetry/v1alpha1"
 	type_beta "istio.io/api/type/v1beta1"
-	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/networking/serviceentry"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
@@ -1128,8 +1127,19 @@ func validateLoadBalancer(settings *networking.LoadBalancerSettings, outlier *ne
 	}
 
 	errs = AppendValidation(errs, agent.ValidateLocalityLbSetting(settings.LocalityLbSetting, outlier))
-	if settings.WarmupDurationSecs != nil {
-		errs = AppendValidation(errs, agent.ValidateDuration(settings.WarmupDurationSecs))
+
+	if warm := settings.Warmup; warm != nil {
+		if warm.Duration == nil {
+			errs = AppendValidation(errs, fmt.Errorf("duration is required"))
+		} else {
+			errs = AppendValidation(errs, agent.ValidateDuration(warm.Duration))
+		}
+		if warm.MinimumPercent.GetValue() > 100 {
+			errs = AppendValidation(errs, fmt.Errorf("minimumPercent value should be less than or equal to 100"))
+		}
+		if warm.Aggression != nil && warm.Aggression.GetValue() < 1 {
+			errs = AppendValidation(errs, fmt.Errorf("aggression should be greater than or equal to 1"))
+		}
 	}
 	return
 }
@@ -2025,8 +2035,7 @@ func asJSON(data any) string {
 	switch mr := data.(type) {
 	case *networking.HTTPMatchRequest:
 		if mr != nil && mr.Name != "" {
-			cl := &networking.HTTPMatchRequest{}
-			protomarshal.ShallowCopy(cl, mr)
+			cl := protomarshal.ShallowClone(mr)
 			cl.Name = ""
 			data = cl
 		}
@@ -2810,9 +2819,6 @@ var ValidateServiceEntry = RegisterValidateFunc("ValidateServiceEntry",
 			}
 			if port.TargetPort != 0 {
 				errs = AppendValidation(errs, agent.ValidatePort(int(port.TargetPort)))
-				if serviceEntry.Resolution == networking.ServiceEntry_NONE && !features.PassthroughTargetPort {
-					errs = AppendWarningf(errs, "targetPort has no effect when resolution mode is NONE")
-				}
 			}
 			if len(serviceEntry.Addresses) == 0 && !autoAllocation {
 				if port.Protocol == "" || port.Protocol == "TCP" {

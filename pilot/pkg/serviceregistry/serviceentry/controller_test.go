@@ -26,6 +26,7 @@ import (
 	"istio.io/api/label"
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/config/memory"
+	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/util/xdsfake"
 	"istio.io/istio/pkg/config"
@@ -1621,7 +1622,7 @@ func expectEvents(t testing.TB, ch *xdsfake.Updater, events ...Event) {
 
 func expectServiceInstances(t testing.TB, sd *Controller, cfg *config.Config, port int, expected ...[]*model.ServiceInstance) {
 	t.Helper()
-	svcs := convertServices(*cfg, "")
+	svcs := convertServices(*cfg)
 	if len(svcs) != len(expected) {
 		t.Fatalf("got more services than expected: %v vs %v", len(svcs), len(expected))
 	}
@@ -1636,7 +1637,7 @@ func expectServiceInstances(t testing.TB, sd *Controller, cfg *config.Config, po
 	// The system is eventually consistent, so add some retries
 	retry.UntilSuccessOrFail(t, func() error {
 		for i, svc := range svcs {
-			endpoints := GetEndpointsForPort(svc, sd.XdsUpdater.(*xdsfake.Updater).Delegate.(*model.EndpointIndexUpdater).Index, port)
+			endpoints := GetEndpointsForPort(svc, sd.XdsUpdater.(*xdsfake.Updater).Delegate.(*model.FakeEndpointIndexUpdater).Index, port)
 			if endpoints == nil {
 				endpoints = []*model.IstioEndpoint{} // To simplify tests a bit
 			}
@@ -1855,8 +1856,8 @@ func TestServicesDiff(t *testing.T) {
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			as := convertServices(*tt.current, "")
-			bs := convertServices(*tt.new, "")
+			as := convertServices(*tt.current)
+			bs := convertServices(*tt.new)
 			added, deleted, updated, unchanged := servicesDiff(as, bs)
 			for i, item := range []struct {
 				hostnames []host.Name
@@ -1968,7 +1969,9 @@ func sortPorts(ports []*model.Port) {
 	})
 }
 
-func Test_autoAllocateIP_conditions(t *testing.T) {
+func Test_legacyAutoAllocateIP_conditions(t *testing.T) {
+	// We are testing the old IP allocation which turns off if the new one is enabled
+	test.SetForTest(t, &features.EnableIPAutoallocate, false)
 	tests := []struct {
 		name         string
 		inServices   []*model.Service
@@ -2167,7 +2170,9 @@ func Test_autoAllocateIP_conditions(t *testing.T) {
 	}
 }
 
-func Test_autoAllocateIP_values(t *testing.T) {
+func Test_legacyAutoAllocateIP_values(t *testing.T) {
+	// We are testing the old IP allocation which turns off if the new one is enabled
+	test.SetForTest(t, &features.EnableIPAutoallocate, false)
 	ips := maxIPs
 	inServices := make([]*model.Service, ips)
 	for i := 0; i < ips; i++ {
@@ -2245,7 +2250,9 @@ func BenchmarkAutoAllocateIPs(t *testing.B) {
 }
 
 // Validate that ipaddress allocation is deterministic based on hash.
-func Test_autoAllocateIP_deterministic(t *testing.T) {
+func Test_legacyAutoAllocateIP_deterministic(t *testing.T) {
+	// We are testing the old IP allocation which turns off if the new one is enabled
+	test.SetForTest(t, &features.EnableIPAutoallocate, false)
 	inServices := make([]*model.Service, 0)
 	originalServices := map[string]string{
 		"a.com": "240.240.109.8",
@@ -2329,6 +2336,9 @@ func Test_autoAllocateIP_deterministic(t *testing.T) {
 }
 
 func Test_autoAllocateIP_with_duplicated_host(t *testing.T) {
+	// Only the old IP auto-allocator has this functionality
+	// TODO(https://github.com/istio/istio/issues/53676): implement this in the new one, and test both
+	test.SetForTest(t, &features.EnableIPAutoallocate, false)
 	inServices := make([]*model.Service, 0)
 	originalServices := map[string]string{
 		"a.com": "240.240.109.8",
